@@ -390,6 +390,7 @@ def test_file_by_document_and_cancellation_preserves_audit(team):
     assert c["events"][-1]["payload"]["note"]=="Duplicado confirmado"
     assert c["files"][0]["id"]==saved["id"] and len(c["lines"])==2
     act(intl,c,"amend",409,note="No procede")
+    act(intl,c,"reopen",403,note="Necesita autorización")
     c=act(admin,c,"reopen",note="Conciliación completada")
     assert c["cycle"]==2 and c["status"]=="enviado" and c["quality_progress"]["total"]==2
     assert intl.get(url+"/files/"+str(saved["id"])).status_code==200

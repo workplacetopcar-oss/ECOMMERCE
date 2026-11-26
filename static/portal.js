@@ -573,7 +573,7 @@ function workForms(c) {
   let html='';
   const owner=role===c.channel,manager=owner||admin, quality=role==='calidad', hasLines=c.lines.length>0;
   const state=c.status, closed=['cerrado','anulado'].includes(state), sent=state!=='borrador';
-  if(closed) return manager?formAction('reopen','Reabrir expediente',noteInput('Motivo de reapertura')):'';
+  if(closed) return (state==='anulado'?admin:manager)?formAction('reopen','Reabrir expediente',noteInput('Motivo de reapertura')):'';
   if(owner && !sent) {
     html+='<div class="actions no-print"><a class="btn" href="#editar/'+c.id+'">Editar borrador</a>'+actionButton('submit','Enviar a Calidad')+'</div>';
   }

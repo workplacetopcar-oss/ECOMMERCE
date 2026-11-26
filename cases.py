@@ -429,8 +429,8 @@ def workflow_summary(c, lines, full=False):
         commercial="Cumplimiento parcial"
     elif communicated:
         commercial="Comunicado"
-    elif decisions or state in ("respondido","cerrado"):
-        commercial="Por comunicar" if decisions else "Por decidir"
+    elif decisions:
+        commercial="Por comunicar"
     else:
         commercial="Por decidir"
     c["commercial_status"]=commercial
@@ -594,13 +594,14 @@ def queue_page():
     limit=max(1,min(request.args.get("limit",50,type=int),200))
     page=max(1,request.args.get("page",1,type=int))
     sorting = {
+        "priority": "CASE WHEN status IN ('enviado','parcial') THEN 0 WHEN status IN ('analisis','informacion') THEN 1 ELSE 2 END,COALESCE(submitted_at,created_at) ASC,id",
         "age": "COALESCE(submitted_at,created_at) ASC,id",
         "channel": "channel,COALESCE(submitted_at,created_at) ASC,id",
         "next": """CASE WHEN status IN ('cerrado','anulado') THEN 'zz' WHEN status IN ('enviado','analisis','parcial')
                  THEN 'calidad' ELSE channel END,COALESCE(submitted_at,created_at) ASC,id""",
         "updated": "updated_at DESC,id DESC",
     }
-    order=sorting.get(request.args.get("sort") or ("age" if role()=="calidad" else "updated"))
+    order=sorting.get(request.args.get("sort") or ("priority" if role()=="calidad" else "updated"))
     if not order:
         abort(400,"Criterio de ordenación desconocido.")
     result=rows("SELECT id,channel,origin,client,date,kind,status,version,cycle,created_at,updated_at,submitted_at,closed_at FROM cases"+
@@ -965,7 +966,10 @@ def handle_action(c,data):
         event(c,action,{"note":note,"previous":previous})
         return
     if action=="reopen":
-        assert_actor(c["channel"],"administrador")
+        if c["status"]=="anulado":
+            assert_actor("administrador")
+        else:
+            assert_actor(c["channel"],"administrador")
         stage(c,"cerrado","anulado")
         note=string(data,"note",True)
         bump(c,status="enviado" if c["submitted_at"] else "borrador",cycle=c["cycle"]+1,closed_at=None)
