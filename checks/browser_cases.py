@@ -60,21 +60,33 @@ def international(page, client):
         line.locator('[name=quantity]').fill("2")
         line.locator('[name=unit]').fill(measure)
         line.locator('[name=reason]').fill("Derrame reportado")
-    page.get_by_role("button", name="Guardar borrador").click()
+    page.get_by_role("button", name="Preparar la carga de archivos").click()
     expect(page.locator("#notice")).to_contain_text("Borrador guardado")
+    page.locator("[name=evidence_line]").select_option(index=1)
+    page.locator("[name=editor_file]").set_input_files({"name":"prueba.txt","mimeType":"text/plain","buffer":b"Evidencia de prueba"})
+    page.get_by_role("button", name="Adjuntar archivo", exact=True).click()
+    expect(page.locator("#saved-evidence")).to_contain_text("prueba.txt")
+    page.get_by_role("button", name="Revisar antes de enviar").click()
+    expect(page.locator("#review-preview")).to_contain_text("FAC-1")
+    expect(page.locator("#review-preview")).to_contain_text("prueba.txt")
+    page.get_by_role("button", name="Confirmar envío a Calidad").click()
+    expect(page.locator("#notice")).to_contain_text("Enviado a Calidad")
     case_url = page.url
-    page.locator("summary").filter(has_text="Adjuntar evidencia").click()
-    upload = page.locator("#upload")
-    upload.locator("[name=file]").set_input_files({"name": "prueba.txt", "mimeType": "text/plain", "buffer": b"Evidencia de prueba"})
-    upload.get_by_role("button", name="Guardar archivo").click()
-    expect(page.locator("#notice")).to_contain_text("Archivo guardado")
-    saved(page, page.get_by_role("button", name="Enviar a Calidad"))
     return case_url
 
 
-def technical_cycle(quality, origin, case_url):
+def technical_cycle(quality, origin, admin, case_url):
+    quality.set_viewport_size({"width":390,"height":844})
     quality.goto(case_url)
     saved(quality, quality.get_by_role("button", name="Acusar recibo"))
+    admin.goto(case_url)
+    early = open_action(admin, "decision")
+    early.locator('[name=replacement]').fill("2")
+    early.locator('[name=authorized_by]').fill("Gerencia de prueba")
+    early.locator('[name=note]').fill("Reposición comercial anticipada para esta referencia.")
+    saved(admin, early.get_by_role("button"))
+    expect(admin.get_by_text("Cliente atendido · Calidad pendiente", exact=True)).to_be_visible()
+    quality.reload()
     form = open_action(quality, "request_info")
     form.locator("[name=note]").fill("Aporta el lote.")
     saved(quality, form.get_by_role("button"))
@@ -96,7 +108,7 @@ def technical_cycle(quality, origin, case_url):
             line.locator("[name=result]").fill("Daño confirmado")
             line.locator("[name=confirmed]").fill("2")
         saved(quality, form.get_by_role("button", name="Publicar respuesta"))
-        expect(quality.locator(".badge").first).to_have_text("Respuesta técnica parcial" if count == 1 else "Respuesta recibida")
+        expect(quality.locator(".badge").filter(has_text="Respuesta técnica parcial" if count == 1 else "Respuesta recibida").first).to_be_visible()
     origin.reload()
     reports = origin.locator("details[data-report-id]")
     reports.first.locator("summary").first.click()
@@ -113,12 +125,27 @@ def commercial_cycle(page):
         form.locator('[name=authorized_by]').fill("Gerencia de prueba")
         form.locator('[name=note]').fill("Resolución documentada.")
         saved(page, form.get_by_role("button"))
-        action = "dispatch" if choice == "replacement" else "resolve"
-        form = open_action(page, action)
-        form.locator('[name=line_id]').select_option(index=i)
-        form.locator('[name=quantity]').fill("2")
-        form.locator('[name=support]').fill("SOPORTE-TEST")
-        saved(page, form.get_by_role("button"))
+        if choice == "replacement":
+            form = open_action(page, "dispatch")
+            form.locator('[name=line_id]').select_option(index=i)
+            form.locator('[name=quantity]').fill("2")
+            form.locator('[name=support]').fill("SOPORTE-TEST")
+            saved(page, form.get_by_role("button"))
+        else:
+            form = open_action(page, "credit_apply")
+            form.locator('[name=number]').fill("NC-PRUEBA")
+            form.locator('[name=total]').fill("120.25")
+            form.locator('[name=currency]').fill("USD")
+            form.get_by_role("button",name="Agregar otro documento").click()
+            for row, number, amount in zip(form.locator("[data-credit-row]").all(),["FAC-1","FAC-2"],["120","0.25"]):
+                row.locator('[name=document_number]').fill(number)
+                row.locator('[name=document_amount]').fill(amount)
+            form.locator('[data-credit-line]').fill("2")
+            saved(page, form.get_by_role("button",name="Registrar aplicación"))
+            applied=page.locator("section").filter(has=page.get_by_role("heading",name="Notas crédito aplicadas"))
+            expect(applied).to_contain_text("Factura FAC-1")
+            expect(applied).to_contain_text("Factura FAC-2")
+            expect(applied).to_contain_text("Saldo por aplicar · USD 0")
     form = open_action(page, "amend")
     form.locator('[name=category]').select_option("inspeccion")
     form.locator('[name=warehouse]').fill("Bodega de prueba")
@@ -137,19 +164,26 @@ def commercial_cycle(page):
 
 
 def national_pdf(page, path):
-    page.get_by_role("link", name="Revisar formulario RSales").click()
+    page.get_by_role("link", name="Revisar CONTACTO de RSales").click()
     page.locator('[name=file]').set_input_files(path)
     page.get_by_role("button", name="Ver vista previa").click()
     rows = page.locator('#pdf-data table').first.locator('tbody tr')
     rows.first.wait_for()
     source_quantities = [int(row.locator("td").nth(2).inner_text().split()[0]) for row in rows.all()]
+    photos = page.locator("#pdf-data .contact-photos img")
+    assert photos.count() > 0
+    for photo in photos.all():
+        photo.scroll_into_view_if_needed()
+        photo.evaluate("img => img.decode()")
+        assert photo.evaluate("img => img.naturalWidth > 0")
     page.get_by_role("button", name="Guardar comprobante y revisar").click()
     expect(page.locator('[data-line]')).to_have_count(len(source_quantities))
     assert [int(x.input_value()) for x in page.locator('[data-line] [name=quantity]').all()] == source_quantities
     page.locator('[name=note]').fill("Verificación de prueba del formulario y sus líneas.")
-    page.get_by_role("button", name="Guardar revisión").click()
-    expect(page.locator("#notice")).to_contain_text("Borrador guardado")
-    saved(page, page.get_by_role("button", name="Enviar a Calidad"))
+    page.get_by_role("button", name="Revisar antes de enviar").click()
+    expect(page.locator("#review-preview")).to_contain_text("Revisión del expediente")
+    page.get_by_role("button", name="Confirmar envío a Calidad").click()
+    expect(page.locator("#notice")).to_contain_text("Enviado a Calidad")
 
 
 def main():
@@ -182,7 +216,7 @@ def main():
             documented = {row["cliente_id"] for row in codes}
             client = next(row for row in customers if row["id"] in documented and row["alias"])
             url = international(users["internacional"], client)
-            technical_cycle(users["calidad"],users["internacional"],url)
+            technical_cycle(users["calidad"],users["internacional"],adm,url)
             commercial_cycle(users["internacional"])
             assert not errors, errors
             print("Chromium: CONTACTO nacional y ciclo internacional con dos líneas, adjunto, dos informes, carta, crédito, despacho, comunicación, cierre y reapertura.")

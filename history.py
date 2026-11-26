@@ -20,6 +20,7 @@ from openpyxl.utils.datetime import from_excel
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 
+from blobs import pack_blob, unpack_blob
 from common import db, now, require, role
 
 bp = Blueprint("history", __name__)
@@ -386,7 +387,7 @@ def stage(conn, data, name, actor, stamp, options=None):
         else:
             bid = conn.execute("""INSERT INTO hist_books(digest,name,original,actor,imported,base_revision,notes)
                                   VALUES(?,?,?,?,?,?,?)""",
-                               (digest,name,data,actor,stamp,revision(conn),packed(notes))).lastrowid
+                               (digest,name,pack_blob(data),actor,stamp,revision(conn),packed(notes))).lastrowid
         conn.executemany("INSERT INTO hist_rows(book,sheet,row_no,source,data,errors,warnings) VALUES(?,?,?,?,?,?,?)",
                          ((bid,s,n,packed(src),packed(d),packed(e),packed(w)) for s,n,src,d,e,w in parsed))
         conn.commit()
@@ -597,7 +598,7 @@ def original_file(bid):
     b=db().execute("SELECT original,name FROM hist_books WHERE id=?",(bid,)).fetchone()
     if not b:
         abort(404)
-    return send_file(BytesIO(b["original"]),as_attachment=True,download_name=b["name"],
+    return send_file(BytesIO(unpack_blob(b["original"])),as_attachment=True,download_name=b["name"],
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",max_age=0)
 
 
@@ -689,7 +690,7 @@ def add_sheet(bid):
         options = worksheet_options(request.form)
         if not options:
             raise ValueError("Escribe el nombre exacto de la hoja o copia dinámica.")
-        stage(conn, book["original"], book["name"], role(), now(), options)
+        stage(conn, unpack_blob(book["original"]), book["name"], role(), now(), options)
     except (ValueError,OSError,KeyError,BadZipFile,DefusedXmlException,ParseError,InvalidFileException) as exc:
         return render_preview(bid,str(exc)),400
     return redirect(url_for(".preview",bid=bid),code=303)

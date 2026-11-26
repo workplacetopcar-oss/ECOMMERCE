@@ -2,6 +2,8 @@
 
 Aplicación privada en español para recepción nacional y de exportación, investigación de Calidad y seguimiento de gerencia. Las cuatro cuentas trabajan sobre la misma base persistente. El servidor obtiene la identidad y el canal de la sesión y autoriza cada consulta, descarga y modificación.
 
+El trabajo diario se realiza en la aplicación. Los adjuntos se cargan desde cada expediente. El importador de histórico es una herramienta administrativa opcional. En modo compartido la aplicación usa D1 para registros y R2 para evidencias, con permisos de servidor por canal y expediente. Las instrucciones para este modo y para vincular identidades están en la [guía de despliegue](DEPLOY.md).
+
 ## Arranque en una estación privada
 
 Se requiere Python 3.12 o 3.13 con SQLite y la zona horaria America/Bogota. Desde la raíz del proyecto:
@@ -56,3 +58,5 @@ Para repetir los recorridos completos de navegador con los soportes privados ya 
 .venv/bin/python checks/browser_cases.py
 .venv/bin/python checks/history_browser.py
 ```
+
+Para verificar el almacenamiento compartido, ejecuta `npm ci` y `npm test` dentro de `storage-worker/`. Desde la raíz ejecuta `.venv/bin/python checks/storage_flow.py`. Con el paquete privado disponible, `.venv/bin/python checks/storage_catalog.py` comprueba además el corte completo y el CONTACTO real en D1/R2 locales. Ambas pruebas usan directorios temporales, puertos de loopback y credenciales efímeras.

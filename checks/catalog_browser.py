@@ -40,9 +40,15 @@ def verify(root, directory, browser):
         return page
     try:
         national=login("nacional")
-        national.get_by_role("link",name="Revisar formulario RSales").click()
+        national.get_by_role("link",name="Revisar CONTACTO de RSales").click()
         national.locator("input[type=file]").set_input_files(root/"ejemplos/CONTACTO_019.pdf")
         national.get_by_role("button",name="Ver vista previa").click()
+        thumbnails=national.locator("#pdf-data .contact-photos img")
+        expect(thumbnails).to_have_count(9)
+        for photo in thumbnails.all():
+            photo.scroll_into_view_if_needed()
+            photo.evaluate("node => node.decode()")
+            assert photo.evaluate("node => node.naturalWidth > 0")
         national.get_by_role("button",name="Guardar comprobante y revisar").click()
         lines=national.locator("[data-line]")
         expect(lines).to_have_count(3)

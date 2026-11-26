@@ -166,6 +166,50 @@ class CatalogTest(unittest.TestCase):
         self.login("nacional")
         self.assertEqual(self.client.post("/api/contacto/import",json={"token":p["token"]}).status_code,404)
 
+    @unittest.skipUnless(os.environ.get("RECLAMOS_PRIVATE_FIXTURES"),"Requiere el comprobante privado")
+    def test_real_photo_routes_and_permissions(self):
+        from PIL import Image
+        raw=(Path(os.environ["RECLAMOS_PRIVATE_FIXTURES"])/"ejemplos/CONTACTO_019.pdf").read_bytes()
+        preview=self.preview(raw)
+        url="/api/contacto/preview/"+preview["token"]+"/fotos/"
+        photos=[p for line in preview["parsed"]["lineas"] for p in line["fotos"]]
+        images={}
+        for p in photos:
+            self.assertTrue(p["disponible"])
+            response=self.client.get(url+str(p["campo"]))
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.mimetype,"image/jpeg")
+            with Image.open(io.BytesIO(response.data)) as image:
+                self.assertGreater(min(image.size),100)
+                image.verify()
+            images[p["campo"]]=hashlib.sha256(response.data).hexdigest()
+            response.close()
+        self.assertEqual(len(images),9)
+        # Two questions in the original reference the same embedded photograph.
+        self.assertEqual(images[21],images[27])
+        self.assertEqual(len(set(images.values())),8)
+        self.assertEqual(self.client.get(url+"16").status_code,404)
+        cid=self.client.post("/api/contacto/import",json={"token":preview["token"]}).get_json()["id"]
+        with self.app.app_context():
+            fid=db().execute("SELECT file_id FROM contact_versions WHERE case_id=?",(cid,)).fetchone()[0]
+        url_saved=f"/api/cases/{cid}/contacto/{fid}/fotos/13"
+        response=self.client.get(url_saved)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(hashlib.sha256(response.data).hexdigest(),images[13])
+        response.close()
+        self.assertEqual(self.client.get(f"/api/cases/{cid}/contacto/{fid+1}/fotos/13").status_code,404)
+        self.login("nacional")
+        self.assertEqual(self.client.get(url+"13").status_code,404)
+        self.login("internacional")
+        self.assertEqual(self.client.get(url+"13").status_code,403)
+        self.assertEqual(self.client.get(url_saved).status_code,404)
+        self.login("calidad")
+        self.assertEqual(self.client.get(url_saved).status_code,404)
+        self.login("administrador")
+        response=self.client.get(url_saved)
+        self.assertEqual(response.status_code,200)
+        response.close()
+
     @unittest.skipUnless(os.environ.get("RECLAMOS_PRIVATE_FIXTURES"),"Requiere los ejemplos privados")
     def test_real_cut_and_contact(self):
         base = Path(os.environ["RECLAMOS_PRIVATE_FIXTURES"])

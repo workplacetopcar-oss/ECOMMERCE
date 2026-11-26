@@ -268,3 +268,70 @@ def test_optional_order_quantities_snapshot_and_international_amendment(team):
     assert i["events"][-1]["payload"]["difference"]==1
     assert [l["unit"] for l in i["lines"]]==["caja","galón"]
     assert [r["channel"] for r in team["calidad"].get("/api/cases?sort=channel").json]==["internacional","nacional"]
+
+
+def test_international_invoice_allocations_atomic_and_separate_from_units(team):
+    source, admin, quality = team["internacional"], team["administrador"], team["calidad"]
+    c=post(source,"/api/cases",dict(opening(),submit=True))
+    first,second=[l["id"] for l in c["lines"]]
+    c=act(admin,c,"decision",line_id=first,replacement=2,note="Gesto anticipado de prueba",authorized_by="Gerencia")
+    assert c["label"]=="Cliente atendido · Calidad pendiente" and c["lines"][0]["dispatched"]==0
+    assert quality.get("/api/cases").json[0]["status"]=="enviado"
+    assert source.get("/api/cases?status=por_verificar").json[0]["id"]==c["id"]
+    c=act(admin,c,"decision",line_id=second,credit=1,note="Nota acordada",authorized_by="Gerencia")
+    base=dict(number="NC-001",currency="USD",date=c["date"],total="100.75")
+    apps=[dict(type="factura",number="000A",amount="30.00"),dict(type="oc",number="OC-02",amount="25.50")]
+    act(team["nacional"],c,"credit_apply",404,applications=apps,**base)
+    act(quality,c,"credit_apply",403,applications=apps,**base)
+    key=uuid4().hex
+    initial=c
+    c=act(source,initial,"credit_apply",key=key,applications=apps,**base)
+    same=act(source,initial,"credit_apply",key=key,applications=apps,**base)
+    assert len(same["credit_notes"][0]["applications"])==2
+    assert c["credit_notes"][0]["remaining"]=="45.25"
+    assert c["lines"][1]["credit_done"]==0
+    before_version=c["version"]
+    act(source,c,"credit_apply",409,applications=[dict(type="factura",number="000A",amount="46")],**base)
+    act(source,c,"credit_apply",409,applications=apps,**dict(base,currency="COP"))
+    last=[dict(type="factura",number="000B",amount="45.25")]
+    act(source,c,"credit_apply",409,applications=last,covered_lines=[dict(line_id=second,quantity=2)],**base)
+    assert source.get(f"/api/cases/{c['id']}").json["version"]==before_version
+    c=act(source,c,"credit_apply",applications=last,covered_lines=[dict(line_id=second,quantity=1)],**base)
+    assert c["credit_notes"][0]["remaining"]=="0" and len(c["credit_notes"][0]["applications"])==3
+    assert c["lines"][1]["credit_done"]==1 and c["lines"][1]["confirmed"]==0
+    assert "dispatch" not in [ev["action"] for ev in c["events"]]
+    domestic=post(team["nacional"],"/api/cases",dict(opening(),submit=True))
+    act(admin,domestic,"credit_apply",403,applications=apps,**base)
+
+
+def test_edit_and_submit_draft_together(team):
+    source,quality=team["nacional"],team["calidad"]
+    c=post(source,"/api/cases",{"client":"Prueba"})
+    url=f"/api/cases/{c['id']}"
+    result=source.put(url,json=dict(version=c["version"],submit=True),headers={"Idempotency-Key":uuid4().hex})
+    assert result.status_code==400
+    assert source.get(url).json["client"]=="Prueba" and quality.get(url).status_code==404
+    key=uuid4().hex
+    data=dict(opening(),version=c["version"],submit=True)
+    res=source.put(url,json=data,headers={"Idempotency-Key":key})
+    assert res.status_code==200 and quality.get(url).json["status"]=="enviado"
+    retry=source.put(url,json=data,headers={"Idempotency-Key":key})
+    assert retry.json["version"]==res.json["version"]
+    assert [e["action"] for e in retry.json["events"]]==["create","edit","submit"]
+
+
+def test_attachments_must_belong_to_the_case_and_reference(team):
+    source=team["internacional"]
+    c=post(source,"/api/cases",dict(opening(),submit=True))
+    first,second=c["lines"]
+    url=f"/api/cases/{c['id']}/files"
+    response=source.post(url,data={"version":str(c["version"]),"line_id":str(first["id"]),
+        "file":(io.BytesIO(b"Inspeccion"),"inspeccion.txt")},headers={"Idempotency-Key":uuid4().hex})
+    assert response.status_code==200
+    c=response.json
+    fid=c["files"][-1]["id"]
+    other=post(source,"/api/cases",dict(opening(),submit=True))
+    act(source,other,"amend",404,line_id=other["lines"][0]["id"],file_id=fid,note="Inspección")
+    act(source,c,"amend",400,line_id=second["id"],file_id=fid,note="Inspección")
+    c=act(source,c,"amend",line_id=first["id"],file_id=fid,note="Inspección")
+    assert c["events"][-1]["payload"]["file_id"]==fid

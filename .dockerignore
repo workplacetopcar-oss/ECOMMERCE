@@ -1,10 +1,14 @@
 **
 !requirements.txt
 !app.py
+!blobs.py
+!cloud_db.py
+!credit_notes.py
 !auth.py
 !common.py
 !history.py
 !sync_orders.py
+!sites_identity.py
 !sync_catalog.py
 !contacto.py
 !catalog.py
@@ -14,3 +18,5 @@
 !static/**/*.css
 !static/**/*.js
 !migrations/**/*.sql
+!static/fonts/inter-latin.woff2
+!static/fonts/OFL.txt

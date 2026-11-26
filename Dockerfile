@@ -10,8 +10,8 @@ RUN --mount=type=secret,id=proxy_ca \
     && install -d -m 0700 -o reclamos -g reclamos /data
 
 FROM runtime
-COPY --chown=10001:10001 app.py auth.py cases.py catalog.py common.py contacto.py \
-    history.py metrics.py sync_catalog.py sync_orders.py ./
+COPY --chown=10001:10001 app.py auth.py blobs.py cases.py catalog.py cloud_db.py common.py contacto.py credit_notes.py \
+    history.py metrics.py sites_identity.py sync_catalog.py sync_orders.py ./
 COPY --chown=10001:10001 migrations/ migrations/
 COPY --chown=10001:10001 templates/ templates/
 COPY --chown=10001:10001 static/ static/

@@ -8,6 +8,7 @@ from pathlib import PurePath
 
 from flask import Blueprint, abort, jsonify, request, send_file
 
+import credit_notes
 from common import db, now, require, role, transaction
 
 bp = Blueprint("cases", __name__)
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS case_order_snapshots(
 
 def init_cases(conn):
     conn.executescript(SCHEMA)
+    conn.executescript(credit_notes.SCHEMA)
 
 
 def encode(value):
@@ -279,8 +281,9 @@ def record_file(c, name, content, lid=None, kind="evidence"):
     if not filename or not content or len(content)>MAX_FILE:
         abort(400, "Adjunta un archivo válido de hasta 30 MiB.")
     digest = hashlib.sha256(content).hexdigest()
+    from blobs import pack_blob
     fid=db().execute("""INSERT INTO case_files(case_id,line_id,actor,created_at,filename,size,digest,content)
-        VALUES(?,?,?,?,?,?,?,?)""",(c["id"],lid,role(),now(),filename,len(content),digest,content)).lastrowid
+        VALUES(?,?,?,?,?,?,?,?)""",(c["id"],lid,role(),now(),filename,len(content),digest,pack_blob(content))).lastrowid
     db().execute("INSERT INTO case_file_policy VALUES(?,?)",(fid,kind))
     return fid
 
@@ -314,8 +317,13 @@ def save_contact(parsed, original, filename, source_account):
 def labels(c, commercially_done=False):
     if c["status"] == "cerrado":
         return "Cerrado",""
-    if commercially_done and c["status"] not in ("borrador","respondido"):
-        return "Cliente atendido · Calidad pendiente","calidad"
+    if c["status"] not in ("borrador","respondido"):
+        anticipated = one("""SELECT 1 FROM events e JOIN case_lines l ON l.case_id=e.case_id
+                       AND l.id=json_extract(e.payload,'$.line_id') WHERE e.case_id=? AND e.cycle=?
+                       AND e.action='decision' AND e.actor='administrador' AND l.replacement>0
+                       AND json_extract(e.payload,'$.replacement')>0 LIMIT 1""",(c["id"],c["cycle"]))
+        if commercially_done or anticipated:
+            return "Cliente atendido · Calidad pendiente", c["channel"] if c["status"]=="informacion" else "calidad"
     return {
         "borrador": ("Borrador",c["channel"]), "enviado": ("Sin acuse","calidad"),
         "analisis": ("En análisis","calidad"), "informacion": ("Falta información del área",c["channel"]),
@@ -329,6 +337,9 @@ def balance(line):
 
 
 def commercial_complete(c, lines):
+    if c["channel"]=="internacional" and one("""SELECT n.id FROM credit_notes n LEFT JOIN credit_applications a ON a.note_id=n.id
+           WHERE n.case_id=? GROUP BY n.id,n.total_milli HAVING COALESCE(SUM(a.amount_milli),0)<n.total_milli LIMIT 1""",(c["id"],)):
+        return False
     if not lines:
         decision=one("SELECT id,payload FROM events WHERE case_id=? AND action='decision' AND cycle=? ORDER BY id DESC LIMIT 1",
                      (c["id"],c["cycle"]))
@@ -358,7 +369,20 @@ def accessible_files(cid, fid=None):
     if fid is not None:
         query+=" AND f.id=?"
         args.append(fid)
-    return rows(query+" ORDER BY f.id",args)
+    files=rows(query+" ORDER BY f.id",args)
+    if fid is not None and files:
+        from blobs import unpack_blob
+        files[0]["content"]=unpack_blob(files[0]["content"])
+    return files
+
+
+def evidence_for(c, file_id, line_ids=()):
+    file=next((f for f in accessible_files(c["id"]) if str(f["id"])==str(file_id) and f["kind"]=="evidence"), None)
+    if not file:
+        abort(404,"Soporte compartido no disponible en este expediente.")
+    if file["line_id"] is not None and line_ids and file["line_id"] not in line_ids:
+        abort(400,"El soporte pertenece a otra referencia. Selecciona evidencia de esta línea o del expediente.")
+    return file["id"]
 
 
 def detail(cid):
@@ -384,6 +408,7 @@ def detail(cid):
         link["snapshot"]=json.loads(link["snapshot"] or "{}")
         link["number"]=link["snapshot"].get("number")
         link["code"]=link["snapshot"].get("code")
+    c["credit_notes"]=credit_notes.listed(cid) if c["channel"]=="internacional" else []
     c["label"],c["next_actor"]=labels(c, commercial_complete(c,c["lines"]) and is_communicated(c))
     return c
 
@@ -409,7 +434,9 @@ def list_cases():
         if value:=request.args.get(k):
             if k=="status" and value=="por_verificar":
                 where.append("""(submitted_at IS NOT NULL AND status!='cerrado' AND (
-                    EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND
+                    EXISTS (SELECT n.id FROM credit_notes n LEFT JOIN credit_applications a ON a.note_id=n.id
+                    WHERE n.case_id=cases.id GROUP BY n.id,n.total_milli HAVING COALESCE(SUM(a.amount_milli),0)<n.total_milli)
+                    OR EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND
                     (l.replacement>l.dispatched OR l.credit>l.credit_done OR l.other>l.other_done))
                     OR EXISTS (SELECT 1 FROM events e WHERE e.case_id=cases.id AND e.cycle=cases.cycle
                     AND e.action='decision' AND json_extract(e.payload,'$.type') IN ('credit','other')
@@ -522,6 +549,8 @@ def edit_case(cid):
             reason=string(data,"note")
         bump(c,**vals)
         event(c,"review" if c["origin"]=="rsales_formulario" else "edit",{"note":reason,"changes":changes})
+        if data.get("submit") is True:
+            submit(c)
         return cid
     return mutate(cid,data,edit)
 
@@ -666,9 +695,12 @@ def handle_decision(c,data):
 
 def handle_movement(c,data,action):
     if action=="resolve" and not data.get("line_id") and service_without_lines(c):
-        decision=one("SELECT payload FROM events WHERE case_id=? AND action='decision' AND cycle=? ORDER BY id DESC LIMIT 1",
+        decision=one("SELECT id,payload FROM events WHERE case_id=? AND action='decision' AND cycle=? ORDER BY id DESC LIMIT 1",
                      (c["id"],c["cycle"]))
-        if not decision or commercial_complete(c,[]):
+        if not decision or json.loads(decision["payload"])["type"]=="rejected" or one(
+            "SELECT id FROM events WHERE case_id=? AND cycle=? AND action='resolve' AND id>? LIMIT 1",
+            (c["id"],c["cycle"],decision["id"])
+        ):
             abort(409,"Este caso no tiene un compromiso pendiente.")
         payload=dict(type=json.loads(decision["payload"])["type"],date=day(data,"date"),
                      support=string(data,"support",True),note=string(data,"note"))
@@ -692,9 +724,7 @@ def handle_movement(c,data,action):
     if updated>line[ceiling]:
         abort(409,"El movimiento excede el saldo pendiente de la línea.")
     if data.get("file_id"):
-        if not any(str(f["id"])==str(data["file_id"]) for f in accessible_files(c["id"])):
-            abort(404,"Soporte no disponible.")
-        movement["file_id"]=data["file_id"]
+        movement["file_id"]=evidence_for(c,data["file_id"],(line["id"],))
     set_line(line["id"],**{balance_key:updated})
     bump(c)
     event(c,action,movement)
@@ -780,6 +810,8 @@ def handle_action(c,data):
         event(c,action,{"note":note})
     elif action in ("report_draft","publish"):
         handle_report(c,data,action)
+    elif action=="credit_apply":
+        credit_notes.record(c,data)
     elif action=="decision":
         assert_actor(c["channel"],"administrador")
         handle_decision(c,data)
@@ -802,6 +834,8 @@ def handle_action(c,data):
             if data.get("lot"):
                 set_line(line["id"],lot=string(data,"lot",True))
         payload={k:v for k,v in data.items() if k not in ("action","version","difference")}
+        if data.get("file_id"):
+            payload["file_id"]=evidence_for(c,data["file_id"],(line["id"],) if data.get("line_id") else ())
         if data.get("date"):
             day(data,"date")
         for key in ("quantity","good_box","good_without_box","transferred","unrecovered","declared_amount","calculated_amount"):

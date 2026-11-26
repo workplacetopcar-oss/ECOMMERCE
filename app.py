@@ -9,7 +9,8 @@ from flask import Flask, g, jsonify, redirect, render_template, request
 from werkzeug.exceptions import HTTPException
 
 import auth
-from common import db, role
+from common import db, role, schema_setup
+from blobs import storage_url
 
 ROOT = Path(__file__).resolve().parent
 
@@ -56,11 +57,23 @@ def create_app(config=None):
                             MAX_CONTENT_LENGTH=32 * 1024 * 1024)
     if config:
         app.config.update(config)
+    if bool(storage_url()) != bool(os.environ.get("RECLAMOS_STORAGE_TOKEN")):
+        raise RuntimeError("Completa la configuración privada del gateway D1/R2.")
+    if os.environ.get("RECLAMOS_DEPLOYMENT") == "sites" and not (
+            storage_url().startswith("https://") and app.config["PUBLIC"]
+            and os.environ.get("RECLAMOS_SITES_IDENTITY") == "oidc"):
+        raise RuntimeError("El destino Sitios requiere D1/R2 privado por HTTPS, identidad y acceso seguro.")
     directory = Path(app.config["DATA_DIR"]).resolve()
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     app.config.setdefault("DATABASE", str(directory / "reclamos.sqlite3"))
     app.config["SESSION_COOKIE_SECURE"] = app.config["PUBLIC"]
-    app.secret_key = app.secret_key or session_key(directory)
+    if storage_url():
+        key = os.environ.get("RECLAMOS_SESSION_KEY") or app.secret_key
+        if not key or len(key) < 32:
+            raise RuntimeError("Configura una RECLAMOS_SESSION_KEY privada común a las instancias (32 caracteres o más).")
+        app.secret_key = key
+    else:
+        app.secret_key = app.secret_key or session_key(directory)
     app.jinja_env.globals["csrf_token"] = auth.csrf_token
     app.jinja_env.filters["bogota"] = local_date
     for module in (auth, cases, catalog, history, metrics):
@@ -75,13 +88,13 @@ def create_app(config=None):
 
     with app.app_context():
         conn = db()
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript((ROOT / "migrations" / "001_access.sql").read_text())
-        for init in (cases.init_cases, catalog.init_catalog, history.init_history, metrics.init_metrics):
-            init(conn)
+        if not storage_url():
+            conn.execute("PRAGMA journal_mode=WAL")
+            schema_setup(conn)
 
     @app.before_request
     def private_entry():
+        auth.sites_identity.check_request()
         if request.endpoint == "static":
             return None
         if request.endpoint != "auth.login" and not role():

@@ -1,0 +1,14 @@
+{
+  "name": "gestion-reclamos-storage",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local --ip 127.0.0.1 --port 8787",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.168.0",
+    "miniflare": "5.20261123.1-beta"
+  },
+  "engines": { "node": ">=22.12.0" }
+}

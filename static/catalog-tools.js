@@ -181,3 +181,16 @@ content.addEventListener('click',ev=>{
 
 // Direct entry at #nuevo can render the form before this deferred file has loaded.
 if ($('#editor')) enhanceCatalogEditor();
+
+function contactPhotoGallery(base, photos) {
+  if (!Array.isArray(photos) || !photos.length) return '';
+  const figures=photos.filter(photo=>Number.isInteger(photo.campo) && Number.isInteger(photo.pagina)).map(photo=>{
+    const caption='Pregunta '+photo.campo+' · Pág. '+photo.pagina;
+    if(photo.disponible===false) return '<span class="meta">'+e(caption)+' · Consultar el original</span>';
+    const src=e(base+'/'+photo.campo);
+    return '<figure style="margin:0;min-width:0"><a target="_blank" rel="noopener" href="'+src+'" aria-label="'+e('Abrir fotografía · '+caption)+'">'+
+      '<img src="'+src+'" loading="lazy" alt="'+e('Evidencia del comprobante · '+caption)+'" width="120" height="112" style="object-fit:contain;background:#f6f7f8;max-width:100%">'+
+      '</a><figcaption class="meta">'+e(caption)+'</figcaption></figure>';
+  });
+  return '<div class="contact-photos" style="display:flex;gap:8px;flex-wrap:wrap">'+figures.join('')+'</div>';
+}

@@ -154,6 +154,15 @@ def test_live_board_refresh_preserves_filter(tmp_path):
             page.locator("#password").fill(secret)
             page.get_by_role("button",name="Ingresar").click()
             page.goto(f"http://127.0.0.1:{server.server_port}/indicadores")
+            for width in (360,390,430,768,1440):
+                page.set_viewport_size({"width":width,"height":900})
+                nav=page.locator(".navigation").bounding_box()
+                main=page.locator("main").bounding_box()
+                assert (nav["x"]+nav["width"]<=main["x"]+1 if width>820 else nav["y"]+nav["height"]<=main["y"]+1)
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+            page.set_viewport_size({"width":390,"height":844})
+            assert all(label=="Sin base suficiente" for label in page.locator(".missing-base").all_text_contents())
+            assert page.locator(".missing-base").count()>=2
             first=page.locator("a[href*='detalle=cola_calidad'] strong")
             pw.expect(first).to_have_text("0")
             page.locator("input[name=buscar]").fill("texto en edición")
@@ -168,3 +177,77 @@ def test_live_board_refresh_preserves_filter(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=3)
+
+
+def test_admin_five_queues_link_exact_cases_and_actions(tmp_path):
+    import secrets
+    from uuid import uuid4
+    from app import create_app
+    from auth import bootstrap
+    from test_access import login, csrf
+    from test_cases import opening
+
+    app=create_app({"DATA_DIR":tmp_path,"TESTING":True})
+    passwords={name:secrets.token_urlsafe(16) for name in ("administrador","calidad","nacional","internacional")}
+    with app.app_context():
+        bootstrap({"RECLAMOS_PIN_ADMIN":passwords["administrador"],
+                   "RECLAMOS_PIN_NACIONAL":passwords["nacional"],
+                   "RECLAMOS_PIN_INTERNACIONAL":passwords["internacional"]})
+    clients={name:app.test_client() for name in passwords}
+    admin=clients["administrador"]
+    login(admin,"administrador",passwords["administrador"])
+    assert admin.post("/accesos",data={"account":"calidad","password":passwords["calidad"],
+                                       "csrf_token":csrf(admin,"/accesos")}).status_code==200
+    for name in ("nacional","internacional","calidad"):
+        assert login(clients[name],name,passwords[name]).status_code==302
+        assert clients[name].get("/").status_code==200
+        assert clients[name].get("/api/indicadores").status_code==403
+
+    def post(name,path,body):
+        client=clients[name]
+        with client.session_transaction() as session: token=session["csrf"]
+        r=client.post(path,json=body,headers={"Idempotency-Key":uuid4().hex,"X-CSRF-Token":token})
+        assert r.status_code==200,r.data
+        return r.json
+    def act(name,c,action,**fields):
+        return post(name,f"/api/cases/{c['id']}/actions",dict(action=action,version=c["version"],**fields))
+    def queue(key,expected,person=None,**filters):
+        r=admin.get("/api/indicadores",query_string=dict(detalle=key,**filters))
+        assert r.status_code==200
+        result=r.json
+        assert result["cuentas"][key]==result["total"]==len(expected)
+        assert {i["id"] for i in result["items"]}==set(expected)
+        for i in result["items"]:
+            assert i["case_age"]>=0 and i["next"]
+            assert i["url"]==f"/#caso/{i['id']}"
+            if person: assert i["responsible"]==person
+    board=admin.get("/indicadores").get_data(as_text=True)
+    for title in ("Borradores sin enviar","En Calidad sin respuesta completa","Falta información del área",
+                  "Respuestas por comunicar","Reposiciones por verificar"):
+        assert f"<span>{title}</span>" in board
+    a=post("nacional","/api/cases",opening())
+    b=post("internacional","/api/cases",opening())
+    queue("cola_borradores",[a["id"],b["id"]])
+    queue("cola_borradores",[b["id"]],"Angélica",canal="internacional")
+    a=act("nacional",a,"submit")
+    queue("cola_borradores",[b["id"]],"Angélica")
+    queue("cola_calidad",[a["id"]],"Juan Diego")
+    a=act("calidad",a,"ack")
+    lid=a["lines"][0]["id"]
+    a=act("calidad",a,"request_info",note="Confirma lote",line_id=lid)
+    queue("cola_info",[a["id"]],"Zulay")
+    a=act("nacional",a,"provide_info",note="Lote verificado")
+    queue("cola_info",[])
+    a=act("administrador",a,"decision",line_id=lid,replacement=2,authorized_by="Gerencia",note="Adelanto")
+    queue("cola_reponer",[a["id"]],"Zulay")
+    a=act("calidad",a,"publish",report="Primer análisis",summary="Confirmada una referencia",
+          findings=[dict(line_id=lid,finding="Envase roto",result="Confirmado",confirmed=1)])
+    queue("cola_calidad",[a["id"]],"Juan Diego")
+    queue("cola_comunicar",[a["id"]],"Zulay")
+    r=a["reports"][-1]
+    a=act("nacional",a,"communicate",note="Se explicó",medium="Teléfono",sender="Vendedor",
+          date=a["date"],report_id=r["id"])
+    queue("cola_comunicar",[])
+    for qty in (1,1):
+        a=act("nacional",a,"dispatch",line_id=lid,quantity=qty,date=a["date"],support="Guía de prueba")
+        queue("cola_reponer",[a["id"]] if a["lines"][0]["dispatched"]==1 else [])

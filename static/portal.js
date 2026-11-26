@@ -13,7 +13,7 @@ const channelName = {nacional:'Nacional',internacional:'Internacional',calidad:'
 const actorName = {nacional:'Zulay',internacional:'Angélica',calidad:'Juan Diego',administrador:'Don Carlos'};
 const statuses = {borrador:'Borrador',enviado:'Sin acuse',analisis:'En análisis',informacion:'Falta información',parcial:'Respuesta parcial',respondido:'Respuesta recibida',cerrado:'Cerrado'};
 const origins = {rsales_formulario:'Formulario RSales nacional',nacional_manual:'Manual nacional',internacional_manual:'Manual internacional'};
-const actionNames = {create:'Apertura',created:'Apertura',update:'Edición',submit:'Envío a Calidad',ack:'Acuse de Calidad',request_info:'Solicitud de información',provide_info:'Información aportada',report_draft:'Borrador técnico',publish:'Publicación técnica',decision:'Decisión comercial',dispatch:'Despacho',receipt:'Recepción',resolve:'Cumplimiento',communicate:'Comunicación al cliente',amend:'Ampliación del expediente',close:'Cierre',reopen:'Reapertura',report_read:'Lectura del informe',letter:'Generación de carta',link_order:'Vinculación de pedido',upload:'Archivo adjunto',import:'Importación'};
+const actionNames = {credit_apply:'Aplicación de nota crédito',create:'Apertura',created:'Apertura',update:'Edición',submit:'Envío a Calidad',ack:'Acuse de Calidad',request_info:'Solicitud de información',provide_info:'Información aportada',report_draft:'Borrador técnico',publish:'Publicación técnica',decision:'Decisión comercial',dispatch:'Despacho',receipt:'Recepción',resolve:'Cumplimiento',communicate:'Comunicación al cliente',amend:'Ampliación del expediente',close:'Cierre',reopen:'Reapertura',report_read:'Lectura del informe',letter:'Generación de carta',link_order:'Vinculación de pedido',upload:'Archivo adjunto',import:'Importación'};
 const csrf = $('meta[name="csrf-token"]').content;
 let route = '', revision = 0, dirty = false, busy = false, caseData, lastList, pending, filterTimer;
 let sourceStatus = null;
@@ -49,7 +49,13 @@ async function api(url, options = {}) {
     if (body instanceof FormData) payload = body;
     else { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body ?? {}); }
   }
-  const resp = await fetch(url,{method,headers,body:payload,credentials:'same-origin',cache:'no-store'});
+  let resp;
+  try {
+    resp=await fetch(url,{method,headers,body:payload,credentials:'same-origin',cache:'no-store'});
+  } catch(err) {
+    if(!(err instanceof TypeError)) throw err;
+    throw new Error('No se recibió la respuesta del servidor. Comprueba la conexión y vuelve a intentar.');
+  }
   if (resp.redirected && new URL(resp.url).pathname.includes('login')) throw new Error('La sesión venció. Inicia sesión de nuevo.');
   const type = resp.headers.get('Content-Type') || '';
   const result = type.includes('json') ? await resp.json() : {};
@@ -82,7 +88,12 @@ function setCrumb(text) {
   $('#crumb').innerHTML = text ? '<a href="#bandeja">Expedientes</a> &nbsp;/&nbsp; '+e(text) : 'Reclamos y Calidad';
 }
 function formValues(form) { return Object.fromEntries(new FormData(form)); }
-function setDirty(v=true) { dirty=v; }
+function setDirty(v=true) {
+  dirty=v;
+  const review=$('#review-preview'), status=$('#edit-state');
+  if(v && review) review.hidden=true;
+  if(v && status) status.textContent='Hay cambios pendientes de guardar.';
+}
 addEventListener('beforeunload', ev=>{if(dirty){ev.preventDefault();ev.returnValue='';}});
 content.addEventListener('input',ev=>{if (ev.target.closest('[data-dirty]') && !ev.target.closest('[data-lookup]')) setDirty();});
 function resetViewport() { window.scrollTo(0,0); }
@@ -135,7 +146,7 @@ async function showList(quiet=false,restore=false) {
   const resultHTML=(rows.length?table(['Expediente','Cliente y canal','Recepción','Estado','Siguiente responsable','Última actuación'],rows):'<p class="empty">No hay expedientes que coincidan con esta vista.</p>')+
     '<div class="pager"><span>'+e(total)+' expediente'+(total===1?'':'s')+'</span><button data-page="-1" '+(filters.page<=1?'disabled':'')+'>Anterior</button><span>Página '+e(filters.page)+'</span><button data-page="1" '+(filters.page*pageSize>=total?'disabled':'')+'>Siguiente</button></div>';
   if(quiet && $('#list-results')) {$('#list-results').innerHTML=resultHTML;return;}
-  const actions=role==='nacional'?'<a class="btn primary" href="#contacto">Revisar formulario RSales</a><a class="btn" href="#nuevo">Crear reclamo manual</a>':role==='internacional'?'<a class="btn primary" href="#nuevo">Nuevo reclamo internacional</a>':'';
+  const actions=role==='nacional'?'<a class="btn primary" href="#contacto">Revisar CONTACTO de RSales</a><a class="btn" href="#nuevo">Crear reclamo manual</a>':role==='internacional'?'<a class="btn primary" href="#nuevo">Nuevo reclamo internacional</a>':'';
   const tabs={'':'Todos',borrador:'Borradores',enviado:'Sin acuse',analisis:'En análisis',informacion:'Me pidieron información',parcial:'Respuesta parcial',respondido:'Respuesta recibida',por_verificar:'Por verificar',cerrado:'Cerrados'};
   if(role==='calidad') {delete tabs.borrador; tabs.informacion='Falta información del área';}
   const filterHTML='<div class="queue-tabs" aria-label="Filtrar por estado">'+Object.entries(tabs).map(([v,l])=>'<button data-status="'+v+'" aria-pressed="'+(v===filters.status)+'">'+l+'</button>').join('')+'</div><form id="filters" class="filters">'+field('q','Buscar',filters.q,'search','placeholder="Caso, cliente, producto, lote o pedido"')+(!intake?select('channel','Canal',{'':'Todos',nacional:'Nacional',internacional:'Internacional'},filters.channel):'')+select('origin','Origen de captura',{'':'Todos los orígenes',...(role==='internacional'?{internacional_manual:origins.internacional_manual}:role==='nacional'?{rsales_formulario:origins.rsales_formulario,nacional_manual:origins.nacional_manual}:origins)},filters.origin)+(role==='calidad'?select('sort','Ordenar por',{age:'Mayor antigüedad',channel:'Canal',next:'Siguiente responsable'},filters.sort):'')+'</form>';
@@ -173,16 +184,16 @@ function printSource(data) {
   return '<dl class="facts">'+pairs.map(([k,v])=>'<div><dt>'+e(sourceLabels[k] || k.replaceAll('_',' '))+'</dt><dd>'+
     (v && typeof v==='object'?printSource(v):e(v ?? 'Pendiente'))+'</dd></div>').join('')+'</dl>';
 }
-const sourceLabels={numero_contacto:'Contacto',fecha:'Fecha',fecha_origen:'Fecha declarada',id_solicitud:'ID de solicitud',version_formulario:'Versión de formulario',marcas_fuente:'Fechas del comprobante',calidad_fuente:'Seguimiento declarado · preguntas 44–49',codigo_origen:'Código reportado',campos:'Preguntas',fotos:'Páginas de evidencia',lineas:'Referencias originales',type:'Tipo',number:'Número',date:'Fecha',quantity:'Cantidad',line_id:'Línea',note:'Detalle',report_id:'Versión del informe',media:'Medio',support:'Soporte',actor:'Responsable',case_id:'Expediente',client_snapshot:'Ficha de cliente elegida',product_snapshot:'Producto del catálogo elegido',documents:'Documentos',...clientFields,...extraFields};
+const sourceLabels={difference:'Diferencia por revisar',currency:'Moneda',declared_amount:'Importe declarado',calculated_amount:'Importe calculado',numero_contacto:'Contacto',fecha:'Fecha',fecha_origen:'Fecha declarada',id_solicitud:'ID de solicitud',version_formulario:'Versión de formulario',marcas_fuente:'Fechas del comprobante',calidad_fuente:'Seguimiento declarado · preguntas 44–49',codigo_origen:'Código reportado',campos:'Preguntas',fotos:'Páginas de evidencia',lineas:'Referencias originales',type:'Tipo',number:'Número',date:'Fecha',quantity:'Cantidad',line_id:'Línea',note:'Detalle',report_id:'Versión del informe',media:'Medio',support:'Soporte',actor:'Responsable',case_id:'Expediente',client_snapshot:'Ficha de cliente elegida',product_snapshot:'Producto del catálogo elegido',documents:'Documentos',...clientFields,...extraFields};
 function lineCard(line={}) {
   const idx=freshKey();
   editLines.set(idx,line);
   const f=line.fields || {};
   const lselect=select('incidence','Incidencia',{'daño físico':'Daño físico','servicio':'Servicio','otro':'Otra incidencia'},line.incidence||'otro');
   return '<fieldset data-line="'+idx+'"><legend>Referencia reclamada</legend>'+
-    lookup('products','Buscar en el catálogo','Código, producto, color o presentación','Incluir inactivos')+
+    lookup('products','Buscar en el catálogo','Código, producto, color o presentación','Incluir inactivas')+
     '<div class="selected-source meta">'+(f.product_snapshot?'Selección del catálogo · '+e(f.product_snapshot.code):'Referencia manual o del comprobante')+'</div>'+
-    '<div class="grid">'+field('code','SKU comercial confirmado',line.code)+field('reported_code','Código reportado o del cliente',f.reported_code || f.codigo_origen)+field('description','Descripción',line.description)+field('presentation','Presentación',line.presentation)+field('quantity','Cantidad reclamada',line.quantity,'number','min="0" step="any"')+field('unit','Unidad declarada',line.unit || 'unidad')+field('lot','Lote',line.lot,'text','placeholder="Pendiente si se desconoce"')+field('part','Parte afectada',f.part)+lselect+field('reason','Motivo en palabras del cliente',line.reason,'textarea')+field('documents','Facturas u OC de esta línea',f.documents)+field('evidence_pending','Evidencia por recibir',f.evidence_pending)+'</div>'+
+    '<div class="grid">'+field('code','SKU comercial confirmado',line.code)+field('reported_code','Código reportado o del cliente',f.reported_code || f.codigo_origen)+field('description','Descripción',line.description)+field('presentation','Presentación',line.presentation)+field('quantity','Cantidad reclamada',line.quantity,'number','min="0" step="any"')+field('unit','Unidad declarada',line.unit || 'unidad')+field('lot','Lote o fecha impresa',line.lot,'text','placeholder="Pendiente si se desconoce"')+field('part','Parte afectada',f.part)+lselect+field('reason','Motivo en palabras del cliente',line.reason,'textarea')+field('documents','Facturas u OC de esta línea',f.documents)+field('evidence_pending','Evidencia por recibir',f.evidence_pending)+'</div>'+
     (Array.isArray(f.fotos)?'<p class="meta inline-space">Fotos en el comprobante · '+e(f.fotos.map(p=>'Pregunta '+p.campo+', página '+p.pagina).join(' · '))+'</p>':'')+
     '<button type="button" class="text-button" data-command="remove-line">Quitar referencia</button></fieldset>';
 }
@@ -195,24 +206,85 @@ function showEdit(data) {
   const caseTitle=data?'Revisar RC-'+data.id:intl?'Nuevo reclamo internacional':'Nuevo reclamo nacional';
   const frozenPDF=data?.origin==='rsales_formulario';
   const source=f.contacto || f.pdf_source || f.source_pdf || f.original || f.origen_contacto;
-  content.innerHTML=head(caseTitle,data?'Borrador · '+day(v.created_at):'Recepción '+channelName[role].toLowerCase())+
-    '<form id="editor" data-dirty><section class="panel"><h2>Cliente y contacto</h2>'+
-    lookup('clients',intl?'Buscar en el directorio de exportación':'Buscar en el maestro nacional',intl?'Nombre, alias, país o identificación':'Nombre, código o ciudad',intl?'':'Incluir país por verificar')+
+  const block = (id, title, body) => '<section class="panel form-block" id="block-'+id+'"><h2>'+e(title)+'</h2>'+body+'</section>';
+  const documents = '<details class="inline-space" '+(intl || f.documents?.length?'open':'')+'><summary>Facturas, órdenes de compra y otros documentos</summary><div id="documents">'+(Array.isArray(f.documents)?f.documents:[]).map(docRow).join('')+'</div><button type="button" data-command="add-doc">Agregar factura u otro documento</button></details>';
+  const origin=v.origin || role+'_manual';
+  const opening = facts([['Origen de captura',origins[origin]],['Responsable',actorName[role]]]) +
+    lookup('clients',intl?'Buscar en el directorio de exportación':'Buscar en el maestro nacional de RSales',intl?'Nombre, alias, país o identificación':'Nombre, código o ciudad',intl?'':'Incluir país por verificar')+
     '<p id="client-picked" class="paper-note">'+e(f.client_snapshot?'Cliente seleccionado · '+(f.client_snapshot.name || v.client):'Puedes completar los datos manualmente.')+'</p>'+
     '<div class="grid">'+field('client','Razón social',v.client)+Object.entries(clientFields).map(([key,label])=>field('f_'+key,label,f[key] || '',key==='email'?'email':'text')).join('')+'</div>'+
-    (intl?'<div class="inline-space"><button type="button" data-command="save-client">Guardar este contacto en el directorio</button></div><div id="client-codes" class="inline-space"></div>':'')+'</section>'+
-    panel('Novedad','<div class="grid">'+field('date','Fecha de recepción en Lubristone',v.date || dateInColombia(),'date')+field('f_noticed_at','Fecha en que el cliente notó el problema',f.noticed_at,'date')+
-    select('kind','Tipo de PQR',{producto:'Reclamo de producto',servicio:'Consulta o queja de servicio'},v.kind)+select('f_stage','Etapa de detección',{'Se desconoce':'Se desconoce',bodega:'En bodega',recepcion:'Al recibir',uso:'Durante el uso',otra:'Otra'},f.stage)+field('description','Relato del cliente',v.description,'textarea')+field('f_requested','Solución solicitada',f.requested,'textarea')+'</div>')+
-    panel('Documentos comerciales','<div id="documents">'+(Array.isArray(f.documents)?f.documents:[]).map(docRow).join('')+'</div><button type="button" data-command="add-doc">Agregar factura u otro documento</button>')+
-    panel('Referencias y pruebas','<div id="lines">'+(v.lines.length?v.lines:[{}]).map(lineCard).join('')+'</div><button type="button" data-command="add-line">Agregar otra referencia</button><p class="paper-note inline-space">Guarda el borrador para adjuntar evidencia al expediente o a una referencia.</p>')+
-    (frozenPDF?panel('Revisión del comprobante',(source?'<details><summary>Ver datos de origen</summary>'+printSource(source)+'</details>':'')+field('note','Motivo de las correcciones', '', 'textarea','placeholder="Indica qué cambió respecto del comprobante."')):'')+
-    '<div class="form-footer"><button class="primary" type="submit">Guardar '+(frozenPDF?'revisión':'borrador')+'</button><a href="'+(data?'#caso/'+data.id:'#bandeja')+'">Volver</a></div></form>';
+    (intl?'<div class="inline-space"><button type="button" data-command="save-client">Guardar este contacto en el directorio</button></div><div id="client-codes" class="inline-space"></div>':'')+
+    documents;
+  const problem = '<div class="grid">'+field('date','Fecha de recepción en Lubristone',v.date || dateInColombia(),'date')+field('f_noticed_at','Fecha en que el cliente notó el problema',f.noticed_at,'date')+
+    select('kind','Tipo de PQR',{producto:'Reclamo de producto',servicio:'Consulta o queja de servicio'},v.kind)+select('f_stage','Etapa de detección',{'Se desconoce':'Se desconoce',bodega:'En bodega',recepcion:'Al recibir',uso:'Durante el uso',otra:'Otra'},f.stage)+field('description','Relato del cliente',v.description,'textarea')+field('f_requested','Solución solicitada',f.requested,'textarea')+'</div>';
+  const products = '<div id="lines">'+(v.lines.length?v.lines:v.kind==='servicio'?[]:[{}]).map(lineCard).join('')+'</div><button type="button" data-command="add-line">Agregar otra referencia</button>'+
+    '<div class="evidence-editor"><h3>Evidencias del reclamo</h3><div id="saved-evidence">'+editorEvidence(v)+'</div>'+
+    (v.id?'<div class="grid">'+lineSelect(v,true).replace('name="line_id"', 'name="evidence_line"')+'<label class="field">Foto, video o documento<input name="editor_file" type="file"></label></div><button type="button" data-command="editor-upload">Adjuntar archivo</button>':'')+
+    '<button type="submit" value="stay" class="text-button">'+(v.id?'Guardar cambios y actualizar referencias':'Preparar la carga de archivos')+'</button></div>';
+  const review = (frozenPDF?(source?'<details><summary>Datos originales del comprobante</summary>'+printSource(source)+'</details>':'')+field('note','Motivo de las correcciones', '', 'textarea','placeholder="Indica qué cambió respecto del comprobante."'):'')+
+    '<p id="edit-state" class="meta">'+(v.id?'Borrador guardado · RC-'+v.id+' · '+e(stamp(v.updated_at)):'Borrador nuevo, pendiente de guardar.')+'</p>'+
+    '<div class="form-footer"><button type="button" class="primary" data-command="review-case">Revisar antes de enviar</button><button type="submit" value="save">Guardar '+(frozenPDF?'revisión':'borrador')+'</button><a href="'+(v.id?'#caso/'+v.id:'#bandeja')+'">Volver</a></div><div id="review-preview" hidden></div>';
+  content.innerHTML=head(caseTitle,data?'Borrador · '+day(v.created_at):'Recepción '+channelName[role].toLowerCase())+
+    '<form id="editor" data-dirty>'+block('client','Cliente y origen',opening)+block('issue','Problema reportado',problem)+
+    block('products','Productos y evidencias',products)+block('review','Revisión y envío',review)+'</form>';
   if(typeof enhanceCatalogEditor==='function') enhanceCatalogEditor();
   if (intl) {
     const clientLookup=$('[data-lookup=clients]');
     runLookup(clientLookup).catch(err=>message(err.message,true));
     if(f.client_snapshot?.id) loadCodes(f.client_snapshot.id);
   }
+}
+function editorEvidence(c) {
+  const rows=(c.files || []).map(f=>{
+    const line=c.lines.find(l=>l.id===f.line_id);
+    return ['<a href="/api/cases/'+c.id+'/files/'+f.id+'">'+e(f.filename)+'</a>',e(line?lineLabel(line):'Todo el expediente')];
+  });
+  return rows.length?table(['Archivo guardado','Asociado a'],rows):'<p class="paper-note">Sin archivos guardados.</p>';
+}
+function reviewEditor() {
+  const form=$('#editor');
+  if(!form.reportValidity()) return;
+  const payload=editPayload(form);
+  const missing=[];
+  if(!payload.client) missing.push('razón social');
+  if(!payload.date) missing.push('fecha de recepción');
+  if(!payload.description) missing.push('relato del cliente');
+  if(!payload.lines.length && payload.kind==='producto') missing.push('una referencia reclamada');
+  payload.lines.forEach((l,i)=>{
+    if(!(l.code || l.description) || !(l.quantity>0) || !l.unit || !l.reason)
+      missing.push('identificación, cantidad positiva, unidad y motivo de la referencia '+(i+1));
+  });
+  if(form.elements.editor_file?.files.length) missing.push('guardar el archivo seleccionado');
+  const box=$('#review-preview');
+  const docs=payload.fields.documents.map(doc=>doc.number).join(', ');
+  const files=(editBase.files||[]).map(item=>item.filename).join(', ');
+  box.hidden=false;
+  box.innerHTML='<h3>Revisión del expediente</h3>'+facts([['Cliente',payload.client],['Canal',channelName[role]],['Fecha de recepción',payload.date],['Tipo',payload.kind==='servicio'?'Consulta o queja de servicio':'Reclamo de producto'],['Documentos',docs],['Evidencias guardadas',files],['Recibe',actorName.calidad+' · Calidad']])+
+    '<p class="notes">'+e(payload.description)+'</p>'+
+    (payload.lines.length?table(['Referencia','Presentación','Cantidad reclamada','Lote','Motivo'],payload.lines.map(l=>[e(lineLabel(l)),e(l.presentation||'Por verificar'),e(l.quantity)+' '+e(l.unit),e(l.lot||'Pendiente'),e(l.reason)])):'')+
+    (missing.length?'<p class="notice inline-space" role="alert">Completa antes de enviar: '+e(missing.join('; '))+'.</p>':'<button type="submit" class="primary inline-space" value="submit">Confirmar envío a Calidad</button>');
+  box.scrollIntoView({block:'nearest'});
+}
+async function uploadEditorEvidence() {
+  const form=$('#editor'), input=form.elements.editor_file, file=input.files[0];
+  if(!file) throw new Error('Selecciona una foto, video o documento.');
+  const payload=new FormData();
+  const lid=form.elements.evidence_line.value;
+  payload.set('file',file);
+  payload.set('line_id',lid);
+  payload.set('version',editBase.version);
+  const path='/api/cases/'+editBase.id+'/files';
+  const key=tokenFor([path,editBase.version,lid,file.name,file.size,file.lastModified].join('/'));
+  const updated=await api(path,{method:'POST',body:payload,key});
+  pending=null;
+  editBase.files=updated.files;
+  editBase.version=updated.version;
+  editBase.updated_at=updated.updated_at;
+  input.value='';
+  $('#saved-evidence').innerHTML=editorEvidence(updated);
+  $('#review-preview').hidden=true;
+  $('#edit-state').textContent='Archivo guardado · RC-'+updated.id+' · '+stamp(updated.updated_at);
+  message('Archivo guardado en el expediente.');
 }
 function valueIn(scope,name) {return scope.querySelector('[name="'+name+'"]')?.value.trim() || '';}
 function editPayload(form) {
@@ -227,7 +299,8 @@ function editPayload(form) {
     line.quantity=Number(valueIn(el,'quantity')||0);
     return line;
   }).filter(l=>l.id || l.code || l.description || l.quantity || l.reason || l.fields.reported_code);
-  return {version:editBase.version,client:valueIn(form,'client'),date:valueIn(form,'date'),description:valueIn(form,'description'),kind:valueIn(form,'kind'),fields:f,lines,note:valueIn(form,'note')};
+  const issue=$('#block-issue',form);
+  return {version:editBase.version,client:valueIn(form,'client'),date:valueIn(issue,'date'),description:valueIn(issue,'description'),kind:valueIn(issue,'kind'),fields:f,lines,note:valueIn(form,'note')};
 }
 async function loadCodes(clientId) {
   const node=$('#client-codes'); if(!node) return;
@@ -281,8 +354,8 @@ function pick(btn) {
   $('.results',el).textContent='';setDirty();
 }
 function showPDF() {
-  setCrumb('Revisar formulario RSales');
-  content.innerHTML=head('Revisar formulario RSales','Comprobante nacional de contacto con el cliente')+
+  setCrumb('Revisar CONTACTO de RSales');
+  content.innerHTML=head('Revisar CONTACTO de RSales','Comprobante nacional de contacto con el cliente')+
     panel('Importar comprobante PDF','<form id="pdf-preview"><label class="field">Comprobante original<input name="file" type="file" accept="application/pdf,.pdf" required></label><div class="form-footer"><button class="primary">Ver vista previa</button><a href="#nuevo">Crear reclamo manual</a></div></form>')+'<div id="pdf-data"></div>';
 }
 function renderPreview(response) {
@@ -290,8 +363,8 @@ function renderPreview(response) {
   const p=pdfPreview;
   const lines=p.lineas||[];
   $('#pdf-data').innerHTML=panel('Vista previa del comprobante',(response.warning?'<p class="notice">'+e(response.warning)+'</p>':'')+
-    facts([['Contacto',p.numero_contacto],['Formulario',p.formulario],['Versión',p.version_formulario],['ID de solicitud',p.id_solicitud],['Cliente',p.cliente],['Vendedor',p.vendedor],['Fecha',p.fecha],['Páginas',p.paginas],['Expediente existente',response.existing_case?.id || response.existing_case]])+
-    (lines.length?table(['Código reportado','Referencia','Cantidad','Motivo','Fotos del PDF'],lines.map(l=>[e(l.codigo_origen),e(l.descripcion),e(l.cantidad)+' '+e(l.unidad),e(l.motivo),e((l.fotos||[]).map(f=>'Pág. '+f.pagina+' · P'+f.campo).join(', '))])):'')+
+    facts([['Contacto',p.numero_contacto],['Formulario',p.formulario],['Versión',p.version_formulario],['ID de solicitud',p.id_solicitud],['Empresa',p.cliente],['Asesor',p.vendedor],['Encargado',p.contacto],['Ciudad',p.ciudad],['Teléfono',p.telefono],['Dirección',p.direccion],['Correo',p.correo],['Fecha',p.fecha],['Páginas',p.paginas],['Expediente existente',response.existing_case?.id || response.existing_case]])+
+    (lines.length?table(['Código reportado','Referencia','Cantidad','Motivo','Fotos del PDF'],lines.map(l=>[e(l.codigo_origen),e(l.descripcion),e(l.cantidad)+' '+e(l.unidad),e(l.motivo),contactPhotoGallery('/api/contacto/preview/'+encodeURIComponent(response.token)+'/fotos',l.fotos || [])])):'')+
     '<details><summary>Datos originales y seguimiento</summary>'+printSource(p)+'</details><div class="form-footer"><button type="button" class="primary" data-command="import-pdf">Guardar comprobante y revisar</button></div>');
 }
 const lineLabel=l=>[l.code,l.description].filter(Boolean).join(' · ') || ('Línea '+l.id);
@@ -335,6 +408,7 @@ function workForms(c) {
       '<div class="wide">'+lookup('orders','Buscar pedido','Número o código exacto del pedido','')+'<input type="hidden" name="order_id"><p class="chosen-order meta"></p></div>'+noteInput('Soporte del vínculo'));
   }
   if(manager && sent){
+    if(c.channel==='internacional') html+=creditForm(c);
     if(!hasLines && c.kind==='servicio'){
       html+=formAction('decision','Registrar decisión de servicio',select('type','Tipo de solución',{rejected:'Rechazo sustentado',credit:'Nota crédito',other:'Otra solución'})+field('authorized_by','Persona que autorizó','','text','required')+noteInput());
       html+=formAction('resolve','Documentar cumplimiento del servicio',field('date','Fecha',dateInColombia(),'date','required')+field('support','Soporte','','text','required')+noteInput());
@@ -343,7 +417,7 @@ function workForms(c) {
       const line=c.lines[0];
       html+=formAction('decision','Registrar decisión comercial',lineSelect(c)+amount('replacement','A reponer',line.replacement)+amount('rejected','Rechazadas',line.rejected)+amount('credit','Con nota crédito',line.credit)+amount('other','Otra solución',line.other)+field('authorized_by','Persona que autorizó','','text','required')+noteInput('Solución ofrecida y motivo de la decisión'));
       const attached={'':'Sin archivo asociado'};
-      c.files.forEach(f=>attached[f.id]=f.filename);
+      c.files.filter(f=>f.kind==='evidence').forEach(f=>attached[f.id]=f.filename);
       const movement=lineSelect(c)+amount('quantity','Cantidad de este movimiento','','required')+field('date','Fecha del movimiento',dateInColombia(),'date','required')+field('support','Número o referencia del soporte','','text','required')+select('file_id','Archivo de respaldo',attached);
       html+=formAction('dispatch','Registrar despacho parcial o total',movement)+formAction('receipt','Confirmar recepción',movement)+formAction('resolve','Documentar crédito u otra solución',select('type','Solución',{credit:'Nota crédito',other:'Otra solución'})+movement);
     }
@@ -351,7 +425,7 @@ function workForms(c) {
     c.reports.filter(r=>r.status==='published').forEach(r=>reports[r.id]='Informe '+r.id+' · '+stamp(r.created_at));
     html+=formAction('communicate','Registrar comunicación al cliente',field('sender','Quién comunicó','','text','required')+field('medium','Medio usado','','text','required')+field('date','Fecha',dateInColombia(),'date','required')+select('report_id','Versión comunicada',reports)+noteInput('Qué se comunicó'));
     html+=formAction('amend','Ampliar expediente',select('category','Tipo de ampliación',{inspeccion:'Inspección',lote:'Lote o trazabilidad',reproceso:'Reproceso y recuperación',financiero:'Compromiso financiero',documento:'Factura u orden de compra',reincidencia:'Reincidencia',otro:'Otro'})+
-      lineSelect(c,true)+field('date','Fecha declarada',dateInColombia(),'date')+field('warehouse','Bodega o lugar')+field('responsible','Responsable')+field('lot','Lote verificado')+field('document','Documentos asociados')+field('stage','Etapa o relación con el aviso inicial')+
+      lineSelect(c,true)+field('date','Fecha declarada',dateInColombia(),'date')+field('warehouse','Bodega o lugar')+field('responsible','Responsable')+field('lot','Lote verificado')+field('document','Documentos asociados')+select('file_id','Soporte del expediente',{'':'Sin adjunto',...Object.fromEntries(c.files.filter(f=>f.kind==='evidence').map(f=>[f.id,f.filename]))})+field('stage','Etapa o relación con el aviso inicial')+
       '<details class="wide"><summary>Cuantificación y recuperación</summary><div class="grid">'+field('unit','Medida original')+amount('quantity','Cantidad declarada')+amount('good_box','Buen estado con caja')+amount('good_without_box','Buen estado sin caja')+amount('transferred','Trasvasado a tambores')+amount('unrecovered','Sin recuperar')+field('equivalence','Equivalencia verificada y fuente')+field('currency','Moneda')+amount('declared_amount','Importe declarado')+amount('calculated_amount','Importe calculado')+field('credit_stage','Etapa del crédito')+'</div></details>'+noteInput('Hecho, resultado y procedencia de la información'));
     if(state==='respondido') html+=formAction('close','Cerrar expediente',field('note','Observaciones del cierre','','textarea'));
   }
@@ -388,19 +462,21 @@ function showCase(c) {
   caseData=c;setCrumb('RC-'+c.id);const lines=c.lines||[], events=c.events||[];
   const reportHTML=reportList(c),work=workForms(c);
   const latestRequest=[...events].reverse().find(ev=>ev.action==='request_info');
+  const technicalState=c.label==='Cliente atendido · Calidad pendiente' ? '<span class="badge">'+e(c.status==='parcial'?'Respuesta técnica parcial':statuses[c.status])+'</span>' : '';
   const lineCells=lines.map(l=>['<strong>'+e(lineLabel(l))+'</strong><span class="meta">'+e(l.presentation||'Presentación por verificar')+'</span>',e(l.reason),e(l.lot||'Pendiente'),e(l.quantity)+' '+e(l.unit),e(l.report_cycle===c.cycle?l.confirmed:'Pendiente')]);
+  const originalPDF=events.find(ev=>ev.action==='import')?.payload.file_id;
   const balances=lines.map(l=>[e(lineLabel(l)),e(l.quantity)+' '+e(l.unit),e(l.replacement),e(l.rejected),e(l.credit),e(l.other),e(l.pending)]);
   const movements=lines.map(l=>[e(lineLabel(l)),e(l.unit),e(l.dispatched),e(l.received),e(Math.max(0,l.replacement-l.dispatched)),e(l.credit_done),e(l.other_done)]);
   const links=c.order_links||[];
   const flow=events.slice().reverse().map(ev=>'<details class="entry"><summary>'+e(actionNames[ev.action]||ev.action)+' · '+e(stamp(ev.created_at))+'</summary>'+facts([['Responsable',actorName[ev.actor]||ev.actor],['Ciclo',ev.cycle],['Versión del expediente',ev.version]])+printSource(ev.payload)+'</details>').join('');
   content.innerHTML=head('RC-'+c.id,c.client||'Cliente por completar',nextButton(c,work)+'<button type="button" data-command="print-case">Imprimir expediente</button><a class="btn" href="#bandeja">Volver a la bandeja</a>')+
-    panel('Expediente','<span class="badge attention">'+e(c.label||statuses[c.status])+'</span>'+facts([['Canal',channelName[c.channel]],['Origen',origins[c.origin]],['Recepción',c.date],['Siguiente responsable',actorName[c.next_actor]||c.next_actor],['Enviado a Calidad',c.submitted_at?stamp(c.submitted_at):'Pendiente'],['Última actuación',stamp(c.updated_at)]])+'<p class="notes">'+e(c.description)+'</p><details class="inline-space"><summary>Cliente, documentos y datos de apertura</summary>'+labelSnapshot(c)+'</details>')+
+    panel('Expediente','<span class="badge attention">'+e(c.label||statuses[c.status])+'</span> '+technicalState+facts([['Canal',channelName[c.channel]],['Origen',origins[c.origin]],['Recepción',c.date],['Siguiente responsable',actorName[c.next_actor]||c.next_actor],['Enviado a Calidad',c.submitted_at?stamp(c.submitted_at):'Pendiente'],['Última actuación',stamp(c.updated_at)]])+'<p class="notes">'+e(c.description)+'</p><details class="inline-space"><summary>Cliente, documentos y datos de apertura</summary>'+labelSnapshot(c)+'</details>')+
     (c.status==='informacion'&&latestRequest?panel('Solicitud de Calidad','<p class="notes">'+e(latestRequest.payload.note)+'</p>'+facts([['Referencia',latestRequest.payload.line_id],['Fecha',stamp(latestRequest.created_at)]])):'')+
     panel('Lo que reportó el cliente',(lines.length?table(['Referencia','Motivo','Lote','Cantidad reclamada','Daño confirmado'],lineCells):'<p class="paper-note">Sin líneas de producto.</p>')+
-      lines.map(l=>'<details class="entry"><summary>Detalle de la línea '+l.id+'</summary>'+printSource(l.fields)+'</details>').join('')+
+      lines.map(l=>'<details class="entry"><summary>Detalle de la línea '+l.id+'</summary>'+printSource(l.fields)+(originalPDF?contactPhotoGallery('/api/cases/'+c.id+'/contacto/'+originalPDF+'/fotos',l.fields.fotos || l.fields.photos || []):'')+'</details>').join('')+
       (links.length?'<h3 class="inline-space">Pedidos vinculados</h3>'+table(['Referencia','Pedido','Cantidad asignada','Verificación'],links.map(l=>[e(lineLabel(lines.find(x=>x.id===l.line_id)||{id:l.line_id})),e(l.number||l.order_id),e(l.quantity),'Referencia del pedido por verificar'])):''))+
     panel('Evidencias y soportes',fileList(c))+
-    panel('Respuesta de Calidad',reportHTML)+
+    panel('Respuesta de Calidad',reportHTML)+creditSummary(c)+
     (lines.length?panel('Solución comercial',table(['Referencia','Reclamadas','A reponer','Rechazadas','Crédito','Otra solución','Por decidir'],balances))+
       panel('Cumplimiento de la solución',table(['Referencia','Medida','Despachadas','Recibidas','Por despachar','Crédito comprobado','Otra solución cumplida'],movements)):'')+
     (work?'<section class="panel no-print" id="case-work" tabindex="-1"><h2>Actuaciones disponibles</h2>'+work+'</section>':'')+panel('Historial del expediente',flow || '<p class="paper-note">Sin actuaciones registradas.</p>');
@@ -411,18 +487,24 @@ async function runWrite(task) {
   const active=$$('button:not(:disabled)',content);
   active.forEach(el=>el.disabled=true);
   message('Guardando…');
+  content.inert=true;
   try { await task(); }
-  catch(err) {message(err.message,true);}
-  finally {busy=false;active.forEach(el=>el.disabled=false);}
+  catch(err) {
+    const state=$('#edit-state');
+    if(state) state.textContent='No se confirmó el guardado. Los datos siguen en el formulario para corregir o reintentar.';
+    message(err.message,true);
+  }
+  finally {content.inert=false;busy=false;active.forEach(el=>el.disabled=false);}
 }
 async function sendAction(data) {
   const path='/api/cases/'+caseData.id+'/actions';
   const body={...data,version:caseData.version};
   const result=await api(path,{method:'POST',body,key:tokenFor(path+JSON.stringify(body))});
-  pending=null;dirty=false;showCase(result);message('Actuación guardada · RC-'+result.id+' · '+stamp(result.updated_at));
+  pending=null;dirty=false;showCase(result);message((data.action==='submit'?'Enviado a Calidad':'Actuación guardada')+' · RC-'+result.id+' · '+stamp(result.updated_at));
 }
 function buildAction(form,btn) {
   const type=form.dataset.action;
+  if(type==='credit_apply') return creditPayload(form);
   const data={...formValues(form),action:type};
   for(const k of ['line_id','file_id','report_id','order_id']) {
     if(!data[k]) delete data[k];
@@ -445,14 +527,34 @@ function changedSelection(el) {
 }
 content.addEventListener('submit',evt=>{
   const form=evt.target;
+  const intent=evt.submitter?.value || 'save';
   evt.preventDefault();
   if(form.id==='filters') {changeFilters(formValues(form));return;}
   runWrite(async()=>{
     if(form.id==='editor'){
       const path='/api/cases'+(editBase.id?'/'+editBase.id:'');
       const body=editPayload(form);
+      if(form.elements.editor_file?.files.length) throw new Error('Adjunta el archivo seleccionado antes de continuar.');
+      if(intent==='submit') {
+        if($('#review-preview').hidden) throw new Error('Revisa el expediente antes de enviarlo.');
+        body.submit=true;
+      }
       const result=await api(path,{method:editBase.id?'PUT':'POST',body,key:tokenFor(path+JSON.stringify(body))});
-      dirty=false;pending=null;history.replaceState(null,'','#caso/'+result.id);route='caso/'+result.id;showCase(result);resetViewport();message('Borrador guardado · RC-'+result.id);
+      dirty=false;
+      pending=null;
+      if(intent==='stay'){
+        route='editar/'+result.id;
+        history.replaceState(null,'','#'+route);
+        showEdit(result);
+        $('#block-products').scrollIntoView({block:'start'});
+      } else {
+        route='caso/'+result.id;
+        history.replaceState(null,'','#'+route);
+        showCase(result);
+        resetViewport();
+      }
+      const sent=intent==='submit' && result.submitted_at;
+      message((sent?'Enviado a Calidad':'Borrador guardado')+' · RC-'+result.id+' · '+stamp(sent?result.submitted_at:result.updated_at));
     } else if(form.id==='pdf-preview'){
       pdfToken='';
       const result=await api('/api/contacto/preview',{method:'POST',body:new FormData(form)});
@@ -490,6 +592,8 @@ content.addEventListener('click',evt=>{
   if('page' in btn.dataset) {changeFilters({page:Math.max(1,Number(filters.page)+Number(btn.dataset.page))});return;}
   if('actionButton' in btn.dataset) {runWrite(()=>sendAction({action:btn.dataset.actionButton}));return;}
   if(cmd==='reload'){navigate();return;}
+  if(cmd==='review-case'){reviewEditor();return;}
+  if(cmd==='editor-upload'){runWrite(uploadEditorEvidence);return;}
   if(cmd==='add-doc') {$('#documents').insertAdjacentHTML('beforeend',docRow());setDirty();}
   if(cmd==='add-line') {$('#lines').insertAdjacentHTML('beforeend',lineCard());if(typeof enhanceCatalogEditor==='function')enhanceCatalogEditor();setDirty();}
   if(cmd==='remove-doc'){btn.closest('[data-document]').remove();setDirty();}

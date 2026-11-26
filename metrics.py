@@ -30,16 +30,24 @@ LABELS = {"pendientes":"Enviados a Calidad sin respuesta completa","informacion"
           "tardios":"Pedidos con reclamos registrados después del período","anulados":"Envíos anulados",
           "formularios":"Formularios importados","revisados":"Revisiones del formulario","publicados":"Con respuesta publicada",
           "atendidos":"Comunicación registrada","credito":"Créditos documentados"}
-QUEUES={"cola_calidad":"Enviados a Calidad sin respuesta completa","cola_info":"Esperando información del área",
+QUEUES={"cola_borradores":"Borradores sin enviar","cola_calidad":"En Calidad sin respuesta completa",
+        "cola_info":"Falta información del área",
         "cola_comunicar":"Respuestas por comunicar","cola_reponer":"Reposiciones por verificar"}
 LABELS.update(QUEUES)
 DIMS={"client":"Cliente","seller":"Vendedor","country":"País","city":"Ciudad","code":"Referencia",
       "presentation":"Presentación","lot":"Lote","stage":"Etapa de detección declarada","incidence":"Incidencia","cause":"Causa técnica"}
 STATES = {"borrador":"Borrador","enviado":"Sin acuse","analisis":"En análisis","informacion":"Falta información",
           "parcial":"Respuesta parcial","respondido":"Respuesta completa","cerrado":"Cerrado","anulado":"Anulado"}
-RESPONSIBLE = {"enviado":"Calidad · acusar recibo","analisis":"Calidad · analizar","parcial":"Calidad · completar informe",
-               "informacion":"Área de origen · aportar información","respondido":"Área de origen · verificar solución",
-               "cerrado":"Expediente cerrado","borrador":"Área de origen · completar registro"}
+PEOPLE = {"nacional": "Zulay", "internacional": "Angélica", "calidad": "Juan Diego", "administrador": "Don Carlos"}
+NEXT_STEP = {
+    "borrador": "Completar el borrador y enviar a Calidad",
+    "enviado": "Acusar recibo del expediente",
+    "analisis": "Analizar las referencias y publicar el informe",
+    "informacion": "Aportar la información solicitada",
+    "parcial": "Completar la respuesta técnica pendiente",
+    "respondido": "Comunicar la respuesta y verificar la solución",
+    "cerrado": "Expediente cerrado",
+}
 TIMES={"submit":"Registro a envío","complete":"Envío a respuesta completa","technical":"Registro a respuesta completa",
        "communicate":"Registro a comunicación","dispatch":"Registro a último despacho"}
 BALANCES={"quantity":"Reclamado","confirmed":"Daño confirmado","replacement":"Reposición aprobada",
@@ -206,10 +214,14 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
         sent=c["submitted_at"]
         is_active=sent and c["status"] not in ("anulado","cancelado","borrador")
         anchor = next((e["created_at"] for e in reversed(timeline) if e["action"] in ("submit","reopen")),sent)
+        responsible = "calidad" if c["status"] in ("enviado","analisis","parcial") else c["channel"]
         rec={"id":cid,"ref":f"RC-{cid}","client":c["client"] or "Sin cliente","channel":c["channel"],
              "state":STATES.get(c["status"],c["status"]),"date":str(reg),"sent":str(local_day(anchor)) if anchor else None,
              "age":age(anchor,today()) if anchor else None,"actor":timeline[-1]["actor"] if timeline else "—",
-             "last":timeline[-1]["action"] if timeline else None,"next":RESPONSIBLE.get(c["status"],"Revisar"),
+             "last":timeline[-1]["action"] if timeline else None,
+             "case_age":age(c["created_at"],today()),
+             "responsible":PEOPLE[responsible] if c["status"]!="cerrado" else "—",
+             "next":NEXT_STEP.get(c["status"],"Revisar expediente"),
              "url":f"/#caso/{cid}"}
         if in_period:
             rows["casos"].append(rec)
@@ -224,6 +236,8 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             if ev["communicate"]: clock("communicate",c["created_at"],ev["communicate"][-1]["created_at"],rec)
             if ev["dispatch"]: clock("dispatch",c["created_at"],ev["dispatch"][-1]["created_at"],rec)
             if valid_lines and any(links[l["id"]] for l,d in valid_lines): rows["vinculados"].append(rec)
+        if c["status"]=="borrador" and not sent:
+            rows["cola_borradores"].append(rec)
         if not is_active:
             if sent and a<=local_day(sent)<=b: rows["anulados"].append(rec)
             continue
@@ -233,8 +247,10 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
         current_ev=[e for e in timeline if e["cycle"]==c["cycle"]]
         pub_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="publish"}
         comm_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="communicate"}
-        if pub_ids and max(x or 0 for x in pub_ids) not in comm_ids: rows["cola_comunicar"].append(rec)
-        if any(l["replacement"]>l["dispatched"] for l,d in valid_lines): rows["cola_reponer"].append(rec)
+        if pub_ids and max(x or 0 for x in pub_ids) not in comm_ids:
+            rows["cola_comunicar"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Registrar la comunicación de la respuesta con el vendedor"))
+        if any(l["replacement"]>l["dispatched"] for l,d in valid_lines):
+            rows["cola_reponer"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Verificar el despacho y registrar el soporte de reposición"))
         # Reconstruct the open cycle at the inclusive cut, based on verified events.
         cycle_events=[]
         for e in by_date:
@@ -327,7 +343,7 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
                 rows["historico"].append(historical)
                 seen.add(cid)
     for key in QUEUES:
-        rows[key].sort(key=lambda r:(-(r["age"] or 0),r["id"]))
+        rows[key].sort(key=lambda r:(-(r["case_age"] or 0),r["id"]))
     for k,ids in order_ids.items():
         rows[k]=[orders[i] for i in sorted(ids)]
     runs=list(conn.execute("SELECT start,end,scope FROM rs_runs WHERE state='completa'"))
@@ -458,12 +474,12 @@ def dashboard():
     if args.get("csv")=="1":
         buf=io.StringIO()
         out=csv.writer(buf)
-        out.writerow(["Indicador","Desde","Hasta","Identificador","Cliente","Canal","Fecha","Estado","Importe o cantidad","Línea"])
+        out.writerow(["Indicador","Desde","Hasta","Identificador","Cliente","Canal","Fecha","Estado","Antigüedad (días desde registro)","Responsable","Siguiente acción","Importe o cantidad","Línea"])
         def safe_cell(s):
             return "'"+s if isinstance(s,str) and s.lstrip().startswith(("=","+","-","@")) else s
         for r in results:
             out.writerow([safe_cell(v) for v in (title,str(a),str(b),r["ref"],r["client"],r["channel"],r["date"],
-                                                 r["state"],r.get("measure",""),r.get("line",""))])
+                                                 r["state"],r.get("case_age",""),r.get("responsible",""),r.get("next",""),r.get("measure",""),r.get("line",""))])
         return Response("\ufeff"+buf.getvalue(),mimetype="text/csv; charset=utf-8",
                         headers={"Content-Disposition":"attachment; filename=indicadores-reclamos.csv"})
     if request.path.startswith("/api/"):
@@ -487,7 +503,7 @@ def dashboard():
         month_windows[month]=dict(periodo="rango",desde=str(max(a,start)),hasta=str(min(b,following-timedelta(days=1))))
     group_page=args.get("grupos",1,type=int)
     group_page=max(1,group_page)
-    return render_template("indicadores.html",data=cur,previous=prev,labels=LABELS,origins=ORIGINS,dimensions=DIMS,
+    return render_template("indicadores.html",data=cur,previous=prev,queues=QUEUES,labels=LABELS,origins=ORIGINS,dimensions=DIMS,
         timings=TIMES,amounts=BALANCES,a=a,b=b,prev_start=prev_start,prev_end=prev_end,link=link,rate=format_rate,
         group_rows=groups[50*(group_page-1):50*group_page],group_count=len(groups),group_page=group_page,month_windows=month_windows,scope=channel or "Todos",detail_title=title,page=page,
         items=results[(page-1)*25:page*25],total=len(results),runs=runs,last=last,adapter=bool(os.getenv("RECLAMOS_RSALES_ADAPTER")),

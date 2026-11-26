@@ -1,11 +1,11 @@
 """Private, atomic catalogue snapshots and channel-scoped directory lookups."""
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
-import sqlite3
 import subprocess
 import sys
 import time
@@ -14,7 +14,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from flask import Blueprint, abort, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 
 from common import db, now, require, role, transaction
@@ -424,6 +424,8 @@ def preview_contact():
     conn = db()
     stamp = int(time.time())
     owner = preview_owner()
+    from blobs import pack_blob
+    stored = pack_blob(raw)
     with transaction(conn):
         conn.execute("DELETE FROM contacto_previews WHERE created<?", (stamp-1800,))
         # Keep recent previews from the same session even when two tabs are open.
@@ -432,11 +434,66 @@ def preview_contact():
                      (owner, owner))
         conn.execute("INSERT INTO contacto_previews VALUES(?,?,?,?,?,?)",
                      (token_hash,owner,stamp,secure_filename(file.filename or "") or "comprobante.pdf",
-                      encode(parsed),raw))
+                      encode(parsed),stored))
     existing = conn.execute("SELECT case_id FROM contact_sources WHERE account=? AND request_id=?",
                             (SOURCE, contact_key(parsed,raw))).fetchone()
     return jsonify(parsed=parsed, warning=warning, token=token, existing_case=existing[0] if existing else None,
                    client_candidates=proposed_client(conn, parsed))
+
+
+def contact_preview(token):
+    # A preview is private to the same authenticated browser session until import.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{30,64}", token):
+        abort(404)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    record = db().execute("SELECT parsed,original,filename FROM contacto_previews "
+                          "WHERE token=? AND owner=? AND created>=?",
+                          (digest,preview_owner(),int(time.time())-1800)).fetchone()
+    if not record:
+        abort(404, description="La vista previa venció. Volvé a seleccionar el archivo.")
+    return record
+
+
+def send_contact_photo(parsed, raw, campo):
+    fotos = [f for l in parsed.get("lineas", []) for f in l.get("fotos", [])]
+    target = next((f for f in fotos if f["campo"] == campo), None)
+    if not target or target.get("disponible") is False:
+        abort(404)
+    pagina = target["pagina"]
+    preguntas = ",".join(str(f["campo"]) for f in fotos if f["pagina"] == pagina)
+    try:
+        # Keep the PDF parser and image decoder under the same limits as the preview.
+        data = subprocess.run([sys.executable, str(Path(__file__).with_name("contacto.py")),
+                               "foto", str(pagina), str(campo), preguntas],input=raw,
+                              timeout=12,check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout
+    except subprocess.SubprocessError:
+        abort(404, description="Consultá la evidencia en la página indicada del PDF original.")
+    return send_file(io.BytesIO(data),mimetype="image/jpeg",as_attachment=False,
+                     download_name=f"contacto-pregunta-{campo}.jpg",max_age=0)
+
+
+@bp.get("/api/contacto/preview/<token>/fotos/<int:campo>")
+@require("nacional")
+def preview_photo(token,campo):
+    from blobs import unpack_blob
+    record = contact_preview(token)
+    return send_contact_photo(json.loads(record["parsed"]),unpack_blob(record["original"]),campo)
+
+
+@bp.get("/api/cases/<int:cid>/contacto/<int:fid>/fotos/<int:campo>")
+@require("nacional","internacional","calidad","administrador")
+def case_photo(cid,fid,campo):
+    from cases import accessible_files, get_case
+    get_case(cid)
+    record = db().execute("SELECT parsed FROM contact_versions WHERE case_id=? AND file_id=?", (cid,fid)).fetchone()
+    if not record:
+        abort(404)
+    files = accessible_files(cid,fid)
+    if not files:
+        abort(404)
+    # Use the frozen import of this particular revision, never editable line metadata.
+    source = json.loads(record["parsed"])["fields"]["contacto"]
+    return send_contact_photo(source,files[0]["content"],campo)
 
 
 def case_from_contact(parsed):
@@ -465,13 +522,9 @@ def import_contact():
     form = request.get_json()
     if not isinstance(form,dict) or not isinstance(form.get("token"),str):
         abort(400)
-    token_hash = hashlib.sha256(form["token"].encode()).hexdigest()
-    conn = db()
-    row = conn.execute("SELECT original,parsed,filename FROM contacto_previews WHERE token=? AND owner=? "
-                       "AND created>=?", (token_hash,preview_owner(),int(time.time())-1800)).fetchone()
-    if not row:
-        abort(404, description="La vista previa venció. Volvé a seleccionar el archivo.")
-    raw, parsed, filename = row[0], json.loads(row[1]), row[2]
+    from blobs import unpack_blob
+    row = contact_preview(form["token"])
+    raw, parsed, filename = unpack_blob(row["original"]), json.loads(row["parsed"]), row["filename"]
     case = save_contact(case_from_contact(parsed), raw, filename, SOURCE)
     return jsonify(id=case["id"],version=case["version"])
 
@@ -482,7 +535,8 @@ if __name__ == "__main__":
     parser.add_argument("--data",required=True,help="Directorio privado con los seis maestros JSON")
     args = parser.parse_args()
     os.umask(0o077)
-    conn = sqlite3.connect(args.db, isolation_level=None)
+    from common import open_database
+    conn = open_database(args.db)
     try:
         init_catalog(conn)
         result = import_catalog(conn,args.data)

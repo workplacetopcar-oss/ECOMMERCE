@@ -9,7 +9,6 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -108,7 +107,8 @@ if __name__ == "__main__":
     parser.add_argument("--db",required=True)
     args = parser.parse_args()
     os.umask(0o077)
-    conn = sqlite3.connect(args.db,isolation_level=None,timeout=15)
+    from common import open_database
+    conn = open_database(args.db)
     try:
         init_catalog(conn)
         print("Corte completo. Corrida",refresh_masters(conn,load_adapter()))

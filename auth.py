@@ -11,9 +11,10 @@ import time
 import click
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
-from flask import (Blueprint, abort, current_app, redirect, render_template,
+from flask import (Blueprint, abort, current_app, g, redirect, render_template,
                    request, session, url_for)
 
+import sites_identity
 from common import db, now, require, role, session_digest, transaction
 
 bp = Blueprint("auth", __name__)
@@ -22,6 +23,11 @@ PEOPLE = {"nacional": "Zulay", "internacional": "Angélica",
           "calidad": "Juan Diego", "administrador": "Don Carlos"}
 # Make timing comparable even for accounts with no verifier.
 DUMMY = HASHER.hash(secrets.token_urlsafe(32))
+
+
+@bp.record_once
+def configure_identity(state):
+    sites_identity.configure(state.app, PEOPLE)
 
 
 def csrf_token():
@@ -100,6 +106,8 @@ def login():
     status = 200
     if request.method == "POST":
         name = request.form.get("username", "").strip().lower()
+        if getattr(g, "sites_account", name) != name:
+            abort(403, "La identidad del proyecto no corresponde a esta cuenta.")
         account = db().execute("SELECT verifier FROM accounts WHERE name=?", (name,)).fetchone()
         verifier = account["verifier"] if account else None
         pin = request.form.get("password", "")
@@ -137,6 +145,8 @@ def login():
                     db().execute("INSERT INTO sessions VALUES (?,?,?)",
                                  (session_digest(token), name, clock + 8 * 3600))
                     session["sid"] = token
+                    if "sites_binding" in g:
+                        session["sites_binding"] = g.sites_binding
                     session.permanent = True
                     log("ingreso", name, name)
                 return redirect("/indicadores" if name == "administrador" else "/")

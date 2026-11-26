@@ -43,7 +43,7 @@ def exercise(directory, browser):
             pages[who] = page
             if who == "administrador":
                 page.wait_for_url("**/indicadores")
-                assert page.get_by_text("Enviados a Calidad sin respuesta completa", exact=False).count()
+                assert page.get_by_text("En Calidad sin respuesta completa", exact=False).count()
                 page.goto(base + "/accesos")
                 page.locator("#p-calidad").fill(credentials["calidad"])
                 page.get_by_role("button", name="Activar acceso").click()
@@ -55,7 +55,14 @@ def exercise(directory, browser):
             national.set_viewport_size({"width": width, "height": 850})
             national.get_by_role("link", name="Crear reclamo manual").click()
             national.wait_for_selector("#editor")
+            assert national.locator("#editor > section > h2").all_text_contents() == [
+                "Cliente y origen", "Problema reportado", "Productos y evidencias", "Revisión y envío"
+            ]
             assert national.evaluate("document.documentElement.scrollWidth<=innerWidth"), width
+            if width <= 430:
+                assert national.locator("#block-client .grid").first.evaluate(
+                    "el => getComputedStyle(el).gridTemplateColumns.split(' ').length===1"
+                ), width
             national.locator('#editor a[href="#bandeja"]').click()
             national.wait_for_selector("#list-results")
         national.get_by_role("link", name="Crear reclamo manual").click()
@@ -65,10 +72,25 @@ def exercise(directory, browser):
         line.locator('[name="code"]').fill("PRUEBA")
         line.locator('[name="quantity"]').fill("3")
         line.locator('[name="reason"]').fill("Envase roto al recibir.")
-        national.get_by_role("button", name="Guardar borrador").click()
+        national.get_by_role("button", name="Revisar antes de enviar").click()
+        review = national.locator("#review-preview")
+        expect(review).to_contain_text("Empresa de prueba")
+        expect(review).to_contain_text("3 unidad")
+        # Simulate loss of the confirmation over the network after the server commits.
+        def drop_response(route):
+            response = route.fetch()
+            assert response.ok
+            route.abort("connectionreset")
+        national.route("**/api/cases", drop_response, times=1)
+        review.get_by_role("button", name="Confirmar envío a Calidad").click()
+        expect(national.locator("#notice")).to_contain_text("No se recibió la respuesta")
+        expect(national.locator('#editor [name="client"]')).to_have_value("Empresa de prueba")
+        review.get_by_role("button", name="Confirmar envío a Calidad").click()
+        expect(national.locator("#notice")).to_contain_text("Enviado a Calidad")
         national.wait_for_url("**/#caso/*")
         cid = national.url.split("/")[-1]
-        national.get_by_role("button", name="Enviar a Calidad").click()
+        returned = national.request.get(base + "/api/cases").json()
+        assert len(returned) == 1 and returned[0]["status"] == "enviado"
         expect(national.locator("#content")).to_contain_text("Sin acuse")
         quality = pages["calidad"]
         quality.get_by_role("link", name="RC-" + cid, exact=True).click(timeout=25000)
