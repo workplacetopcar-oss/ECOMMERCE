@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es-CO">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestros · Reclamos Lubristone</title><link rel="stylesheet" href="/static/indicadores.css"></head>
+<body>
+<header><a href="/" class="brand">LUBRISTONE</a><nav aria-label="Principal"><a href="/">Expedientes</a><a href="/indicadores">Indicadores</a><a href="/historico">Histórico</a><a href="/accesos">Accesos</a></nav></header>
+<main>
+<h1>Catálogos y directorios</h1>
+{% if result=='completa' %}<p role="status">El nuevo corte completo está disponible para las áreas.</p>{% elif result=='parcial' %}<p role="alert">La actualización quedó pendiente. Revisa la configuración del adaptador y el historial de lecturas.</p>{% endif %}
+<section><h2>Último corte completo</h2>
+{% if loaded %}
+<p>Publicado el {{ loaded|bogota }} · Hora de Colombia</p>
+<table><thead><tr><th>Fuente</th><th>Registros</th><th>Lectura de origen</th></tr></thead>
+<tbody>
+<tr><td>Productos RSales</td><td>{{meta.productos.codigos}}</td><td>{{meta.productos.consulta_final_utc|bogota}}</td></tr>
+<tr><td>Directorio nacional RSales</td><td>{{meta.clientes_rsales.codigos}}</td><td>{{meta.clientes_rsales.consulta_final_utc|bogota}}</td></tr>
+<tr><td>Directorio de exportación</td><td>{{meta.directorio_internacional.clientes}}</td><td>Directorio privado entregado</td></tr>
+<tr><td>Fichas de presentaciones</td><td>{{meta.catalogo_complementario.fichas}}</td><td>Catálogo privado entregado</td></tr>
+</tbody></table>
+{% else %}<p>El directorio y el catálogo inicial están pendientes de carga.</p>{% endif %}
+</section>
+<section><h2>Actualización de maestros nacionales</h2>
+{% if configured and loaded %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button>Leer productos y clientes de RSales</button></form>
+{% elif not configured %}<p>Conexión de lectura pendiente. El equipo puede trabajar con el último corte importado.</p>{% else %}<p>La primera carga incluye el directorio privado de exportación y las fichas de presentaciones.</p>{% endif %}
+{% if runs %}<table><thead><tr><th>Inicio</th><th>Estado</th><th>Páginas</th><th>Productos</th><th>Clientes</th><th>Fin</th></tr></thead>
+<tbody>{% for run in runs %}<tr><td>{{run.started|bogota}}</td><td>{{run.state|capitalize}}</td><td>{{run.pages if run.pages!=none else '—'}}</td><td>{{run.products if run.products!=none else '—'}}</td><td>{{run.clients if run.clients!=none else '—'}}</td><td>{{run.finished|bogota}}</td></tr>{% endfor %}</tbody></table>
+{% else %}<p>Sin lecturas del adaptador registradas.</p>{% endif %}
+</section></main></body></html>

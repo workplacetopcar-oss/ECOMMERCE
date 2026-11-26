@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+instance/
+.env
+*.sqlite*
+*.db
+datos_privados/
+ejemplos/
+*.zip
+*.xlsx
+*.pdf
+.env.*
+*.db-wal
+*.db-shm
+session.key

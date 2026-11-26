@@ -1,0 +1,16 @@
+**
+!requirements.txt
+!app.py
+!auth.py
+!common.py
+!history.py
+!sync_orders.py
+!sync_catalog.py
+!contacto.py
+!catalog.py
+!cases.py
+!metrics.py
+!templates/**/*.html
+!static/**/*.css
+!static/**/*.js
+!migrations/**/*.sql

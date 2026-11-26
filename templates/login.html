@@ -1,0 +1,9 @@
+{% extends 'auth_base.html' %}
+{% block title %}Acceso privado{% endblock %}
+{% block content %}<section class="login card">
+<p class="tag">RECLAMOS Y CALIDAD</p><h1>Acceso privado</h1>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="username">Usuario</label><input id="username" name="username" autocomplete="username" autocapitalize="none" required autofocus>
+<label for="password">Clave</label><input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required>
+{% if public %}<label for="otp">Código de tu autenticador</label><input id="otp" name="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required>{% endif %}
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}<button>Ingresar</button></form></section>{% endblock %}

@@ -1,0 +1,55 @@
+services:
+  app:
+    build: .
+    environment:
+      RECLAMOS_DATA_DIR: /data
+      RECLAMOS_PUBLIC: "1"
+      RECLAMOS_TOTP_NACIONAL: ${RECLAMOS_TOTP_NACIONAL:?Falta el secreto TOTP de nacional}
+      RECLAMOS_TOTP_INTERNACIONAL: ${RECLAMOS_TOTP_INTERNACIONAL:?Falta el secreto TOTP de internacional}
+      RECLAMOS_TOTP_CALIDAD: ${RECLAMOS_TOTP_CALIDAD:?Falta el secreto TOTP de calidad}
+      RECLAMOS_TOTP_ADMINISTRADOR: ${RECLAMOS_TOTP_ADMINISTRADOR:?Falta el secreto TOTP de administrador}
+    volumes:
+      - reclamos_data:/data
+    networks:
+      - privado
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/login', timeout=4).close()"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  https:
+    image: caddy:2-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    environment:
+      NO_PROXY: "app,localhost,127.0.0.1,${NO_PROXY:-}"
+      no_proxy: "app,localhost,127.0.0.1,${no_proxy:-}"
+      RECLAMOS_DOMAIN: ${RECLAMOS_DOMAIN:?Especifica el dominio en .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - publico
+      - privado
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+
+networks:
+  publico: {}
+  privado:
+    internal: true
+
+volumes:
+  reclamos_data: {}
+  caddy_data: {}
+  caddy_config: {}

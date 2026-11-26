@@ -1,38 +1,58 @@
-# Kit Lubricación Extrema · Propuesta animada
+# Gestión de Reclamos · Lubristone
 
-Prototipo independiente en `dist/index.html`. Abrir ese archivo en un navegador manteniendo las dos fotografías en la misma carpeta. HTML, CSS y JavaScript sin dependencias de compilación. Fuentes de Google opcionales, con fuentes de sistema de respaldo.
+Aplicación privada en español para recepción nacional y de exportación, investigación de Calidad y seguimiento de gerencia. Las cuatro cuentas trabajan sobre la misma base persistente. El servidor obtiene la identidad y el canal de la sesión y autoriza cada consulta, descarga y modificación.
 
-## Alcance
-- Diseño responsive inspirado en la narrativa editorial y el movimiento de la referencia La Poción; no copia su marca ni sus piezas.
-- Fotografías originales Lubristone sin reconstruir etiquetas.
-- Rutina interactiva de tres pasos, aparición al desplazarse, fotografía flotante, cinta animada, CTA fijo, FAQ y simulador de oferta.
-- Respeta `prefers-reduced-motion`, controles de teclado y modal con cierre Escape y foco contenido.
-- **No está conectado a Shopify, Releasit ni a pedidos. No recauda datos ni hace cobros.**
+## Arranque en una estación privada
 
-## Oferta verificada el 17 de noviembre de 2026
-Fuente: producto público `https://lubristone.tv/products/kit-lubricacion-extrema.js` y fotografía de oferta vigente.
+Se requiere Python 3.12 o 3.13 con SQLite y la zona horaria America/Bogota. Desde la raíz del proyecto:
 
-| Selección | Total COP |
-|---|---:|
-| 1 kit, envío estándar | $99.900 |
-| 1 kit, prioridad | $107.900 |
-| 2 kits, envío estándar | $169.830 |
-| 2 kits, prioridad | $177.830 |
+```sh
+umask 077
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/flask --app app init-accounts
+.venv/bin/python app.py
+```
 
-30% únicamente en el segundo kit. Prioridad: $8.000 por pedido e incluye un llavero por pedido. Envío estándar gratis sin llavero. Pago contra entrega. Cada kit incluye Graphenox aerosol 400 ml, desengrasante 500 ml tapa push, Renovador Partes Negras 50 ml y sachet Carwash 50 ml como obsequios, y bolsa práctica.
+Antes del primer `init-accounts`, inyecta las tres claves del propietario mediante `RECLAMOS_PIN_NACIONAL`, `RECLAMOS_PIN_INTERNACIONAL` y `RECLAMOS_PIN_ADMIN` en el entorno privado de ese comando. El alta guarda verificadores Argon2id y puede repetirse. Don Carlos activa a Juan Diego desde **Accesos**. Un restablecimiento de clave revoca todas las sesiones de la cuenta.
 
-Fotografías:
-- `kit.jpg`: https://cdn.shopify.com/s/files/1/0748/2851/3370/files/kit-graphenox-nueva-oferta-sin-llavero-2026-11.jpg?v=1794410394
-- `kit-prioridad.jpg`: https://cdn.shopify.com/s/files/1/0748/2851/3370/files/kit-graphenox-llavero-foto-original-2026-11.jpg?v=1794411527
+El proceso escucha en la interfaz local, puerto 8001. Abre la ruta `/login` en ese puerto. Para varios dispositivos, instala un único servidor HTTPS con volumen persistente y segundo factor individual según la [guía de despliegue](DEPLOY.md).
 
-## Validación
-JavaScript parseado sin errores. Prueba automatizada con DOM simulado de cuatro totales, selección, cambio de fotografía, apertura/cierre del resumen, foco y pasos de rutina. Sin formularios ni llamadas de envío de pedidos. Pendiente inspección visual en navegador móvil y escritorio.
+## Datos y catálogos
 
-## Integración futura
-El botón abre un resumen simulado. Su conexión a formulario Shopify/Releasit requiere trabajo separado y prueba completa. No modificar la tienda publicada desde este prototipo. Antes de producción, confirmar cobertura, tiempos de entrega, políticas y cualquier promesa adicional. No se incorporan reseñas, urgencia ni resultados técnicos inventados.
+`RECLAMOS_DATA_DIR` selecciona el directorio privado. Por defecto es `instance/`. La aplicación prepara las tablas al arrancar. Conserva el directorio en un volumen persistente con permisos exclusivos de la cuenta de servicio. Las evidencias, las versiones y las relaciones de los expedientes quedan en `reclamos.sqlite3`. Los datos de prueba se crean en directorios temporales independientes.
 
-## QA de esta entrega
-- Verificación estática: IDs únicos, anclas internas válidas e imágenes locales presentes.
-- Pruebas de JavaScript con DOM simulado: 4 totales, selección de cantidad y envío, rutina y apertura/cierre de resumen correctos.
-- Ajustes preventivos de overflow horizontal, navegación estrecha y modal en pantallas bajas.
-- Inspección visual real en escritorio/móvil pendiente: Chromium no pudo iniciar por restricciones del entorno. No se afirma validación visual ni medición de rendimiento.
+Para cargar o actualizar los maestros, usa el directorio `datos_privados/` del paquete original fuera del repositorio. Usa la misma ruta de base que el servidor.
+
+```sh
+.venv/bin/python catalog.py --db instance/reclamos.sqlite3 --data /ruta/privada/datos_privados
+```
+
+La carga valida el corte antes de sustituir los maestros. Cada expediente conserva su información histórica. El PDF de CONTACTO se importa desde la bandeja nacional. Los archivos antiguos de Excel se revisan en **Histórico**, donde se concilian antes de confirmarlos.
+
+## Recorrido de trabajo
+
+1. **Zulay** revisa el PDF del vendedor o abre un reclamo manual. **Angélica** selecciona un cliente de exportación e incorpora las facturas, referencias y medidas declaradas. Ambas pueden recuperar borradores.
+2. El área de origen envía el caso a Calidad. **Juan Diego** acusa recibo, solicita evidencia si hace falta y publica su dictamen por referencia.
+3. El área registra la comunicación, la decisión comercial y sus soportes. El expediente admite reposiciones parciales, créditos y reapertura con motivo. Cada actuación conserva autor y fecha.
+4. **Don Carlos** consulta la cola de trabajo, los indicadores, sus registros de origen, el histórico y los accesos. La configuración de lectura y el contrato del adaptador privado se describen en [RSales](RSALES.md).
+
+## Verificación
+
+```sh
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q
+.venv/bin/python checks/benchmark.py
+.venv/bin/python -m playwright install chromium
+.venv/bin/python checks/browser_flow.py
+```
+
+Para ejecutar también los controles del corte real y de CONTACTO, define `RECLAMOS_PRIVATE_FIXTURES` como la ruta privada que contiene `datos_privados/` y `ejemplos/`. Puedes elegir un Chromium ya instalado mediante `CHROMIUM`. El benchmark crea 10.000 expedientes sintéticos, mide la respuesta local de la bandeja y el p95 de 60 búsquedas. La prueba de navegador usa cuatro sesiones independientes y una base temporal.
+
+Para repetir los recorridos completos de navegador con los soportes privados ya disponibles:
+
+```sh
+.venv/bin/python checks/catalog_browser.py
+.venv/bin/python checks/browser_cases.py
+.venv/bin/python checks/history_browser.py
+```

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es-CO">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>Expedientes · Reclamos y Calidad</title>
+  <link rel="stylesheet" href="/static/portal.css">
+  <script defer src="/static/portal.js"></script>
+  <script defer src="/static/catalog-tools.js"></script>
+</head>
+<body data-role="{{ role }}">
+<a class="skip" href="#contenido">Saltar a la bandeja</a>
+<div class="workspace">
+  <aside class="sidebar">
+    <header class="brand"><span class="brand-name">LUBRISTONE</span><span>Reclamos y Calidad</span></header>
+    <nav aria-label="Navegación principal">
+      <a href="#bandeja" class="navlink active"><span aria-hidden="true">▤</span> Expedientes</a>
+      {% if role == 'administrador' %}
+      <a href="/indicadores" class="navlink">Indicadores</a>
+      <a href="/historico" class="navlink">Histórico</a>
+      <a href="/accesos" class="navlink">Accesos</a>
+      {% endif %}
+    </nav>
+    <div class="account"><strong>{{ person }}</strong><span>{{ {'nacional':'Recepción nacional','internacional':'Exportación','calidad':'Calidad','administrador':'Administración'}.get(role,role) }}</span>
+    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="text-button" type="submit">Cerrar sesión</button></form></div>
+  </aside>
+  <main id="contenido" tabindex="-1">
+    <div id="crumb" class="crumb"></div>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <div id="content"><p class="empty">Cargando bandeja…</p></div>
+  </main>
+</div>
+<noscript>Activa JavaScript en tu navegador para consultar y registrar expedientes.</noscript>
+</body>
+</html>
