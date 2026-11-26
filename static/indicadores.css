@@ -43,3 +43,19 @@
 }
 .filters label { grid-template-columns: minmax(0,1fr); }
 .filters :is(input,select) { min-width: 0; width: 100%; }
+.admin-menu { margin: 0; }
+.admin-menu summary { cursor: pointer; font-weight: 650; }
+.admin-menu nav { margin: 0; }
+@media (min-width: 821px) {
+  .admin-menu[open] > summary { display: none; }
+}
+body { font-size: 16px; font-variant-numeric: tabular-nums; }
+main h1 { font-size: clamp(28px,3vw,32px); }
+label { font-size: 14px; }
+.admin > .cards { grid-template-columns: repeat(auto-fit,minmax(min(100%,230px),1fr)); }
+.admin .card { padding: 16px; border: 1px solid #e5e7e9; border-radius: 12px; }
+.admin .card form { display: grid; gap: 8px; }
+.admin .card input { width: 100%; }
+.extra-filters { flex-basis: 100%; }
+.extra-filters > div { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,160px),1fr)); gap: 12px; }
+@media (max-width:600px) { .extra-filters > div { grid-template-columns: minmax(0,1fr); } }

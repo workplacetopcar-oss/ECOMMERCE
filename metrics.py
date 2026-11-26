@@ -29,10 +29,10 @@ LABELS = {"pendientes":"Enviados a Calidad sin respuesta completa","informacion"
           "confirmados":"Pedidos despachados con daño confirmado","historico":"Expedientes históricos por verificar",
           "tardios":"Pedidos con reclamos registrados después del período","anulados":"Envíos anulados",
           "formularios":"Formularios importados","revisados":"Revisiones del formulario","publicados":"Con respuesta publicada",
-          "atendidos":"Comunicación registrada","credito":"Créditos documentados"}
-QUEUES={"cola_borradores":"Borradores sin enviar","cola_calidad":"En Calidad sin respuesta completa",
+          "atendidos":"Comunicación registrada","reincidencias":"Expedientes con reincidencia documentada","credito":"Créditos documentados"}
+QUEUES={"cola_calidad":"En Calidad sin respuesta completa",
         "cola_info":"Falta información del área",
-        "cola_comunicar":"Respuestas por comunicar","cola_reponer":"Reposiciones por verificar"}
+        "cola_comunicar":"Respuesta por comunicar","cola_reponer":"Reposición por verificar","cola_borradores":"Borradores sin enviar"}
 LABELS.update(QUEUES)
 DIMS={"client":"Cliente","seller":"Vendedor","country":"País","city":"Ciudad","code":"Referencia",
       "presentation":"Presentación","lot":"Lote","stage":"Etapa de detección declarada","incidence":"Incidencia","cause":"Causa técnica"}
@@ -47,11 +47,60 @@ NEXT_STEP = {
     "parcial": "Completar la respuesta técnica pendiente",
     "respondido": "Comunicar la respuesta y verificar la solución",
     "cerrado": "Expediente cerrado",
+    "anulado": "Anulación registrada",
 }
-TIMES={"submit":"Registro a envío","complete":"Envío a respuesta completa","technical":"Registro a respuesta completa",
+TIMES={"ack":"Envío a acuse de Calidad","fulfilled":"Registro a cumplimiento documentado","submit":"Registro a envío","complete":"Envío a respuesta completa","technical":"Registro a respuesta completa",
        "communicate":"Registro a comunicación","dispatch":"Registro a último despacho"}
-BALANCES={"quantity":"Reclamado","confirmed":"Daño confirmado","replacement":"Reposición aprobada",
+BALANCES={"received":"Reposición recibida","credit_done":"Cantidad acreditada","quantity":"Reclamado","confirmed":"Daño confirmado","replacement":"Reposición aprobada",
           "dispatched":"Con despacho registrado","pending":"Reposición pendiente"}
+EVENT_LABELS={"create":"Registro", "import":"Importación CONTACTO", "review":"Revisión del comprobante",
+    "edit":"Edición del borrador", "submit":"Envío a Calidad", "ack":"Acuse de Calidad", "file":"Adjunto",
+    "request_info":"Solicitud de información", "provide_info":"Información aportada","publish":"Publicación técnica",
+    "report_draft":"Borrador de informe","decision":"Decisión comercial","dispatch":"Despacho","receipt":"Recepción",
+    "resolve":"Solución documentada","communicate":"Comunicación","amend":"Ampliación","credit_apply":"Crédito aplicado",
+    "close":"Cierre","reopen":"Reapertura","report_read":"Consulta del informe","letter":"Generación de carta",
+    "import_revision":"Revisión importada","link_order":"Vínculo con pedido","cancel":"Anulación"}
+SERIES={"dia":"Día","semana":"Semana","mes":"Mes","trimestre":"Trimestre","anio":"Año"}
+
+
+def series_window(day,grain):
+    if grain=="dia": return day,day
+    if grain=="semana":
+        start=day-timedelta(days=day.weekday())
+        return start,start+timedelta(days=6)
+    length={"mes":1,"trimestre":3,"anio":12}[grain]
+    month=1+length*((day.month-1)//length)
+    following=date(day.year+(month+length-1)//12,(month+length-1)%12+1,1)
+    return date(day.year,month,1),following-timedelta(days=1)
+
+
+def commercial_progress(lines,timeline,open_credit):
+    """Return the current commercial outcome and the completion event of this cycle, if documented."""
+    decisions=[e for e in timeline if e["action"]=="decision"]
+    if not decisions:
+        return "Por decidir",None
+    last_comm=next((e for e in reversed(timeline) if e["action"]=="communicate"),None)
+    communicated=last_comm and last_comm["id"]>decisions[-1]["id"]
+    events=[e for e in timeline if e["action"] in ("decision","dispatch","resolve","credit_apply")]
+    if open_credit:
+        return "Crédito pendiente de aplicación",None
+    if not lines:
+        rejected=json_dict(decisions[-1]["payload"]).get("type")=="rejected"
+        if rejected:
+            return ("Rechazo comunicado",last_comm) if communicated else ("Rechazo por comunicar",None)
+        return ("Compromiso cumplido",events[-1]) if events[-1]["action"] in ("resolve","credit_apply") else ("Compromiso pendiente",None)
+    if any(l["replacement"]>l["dispatched"] for l in lines):
+        return ("Reposición parcial" if any(l["dispatched"] for l in lines) else "Reposición aprobada"),None
+    if any(l["credit"]>l["credit_done"] for l in lines): return "Crédito pendiente",None
+    if any(l["other"]>l["other_done"] for l in lines): return "Otra solución pendiente",None
+    if any(round(l["quantity"]-sum(l[k] for k in ("rejected","replacement","other","credit")),3)>0 for l in lines):
+        return "Decisión parcial",None
+    if any(l["rejected"] for l in lines) and not communicated: return "Rechazo por comunicar",None
+    end=events[-1]
+    if any(l["rejected"] for l in lines) and last_comm["id"]>end["id"]: end=last_comm
+    return "Compromisos cumplidos",end
+
+
 def today():
     return datetime.now(BOGOTA).date()
 
@@ -125,13 +174,16 @@ def age(start,end,calendar="calendario"):
     return n
 
 
-def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creacion"):
+def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creacion",series="mes",extra=None):
     where="channel=?" if channel else "1=1"
     ch_args=(channel,) if channel else ()
     rows=recordsets()
     filter_text=query.casefold().strip()
     settings=dict(conn.execute("SELECT * FROM rs_settings WHERE id=1").fetchone())
+    filters={k:v.strip().casefold() for k,v in (extra or {}).items() if v.strip()}
     def matches(row):
+        for key,value in filters.items():
+            if value not in str(row.get(key) or "Por verificar").casefold(): return False
         return not filter_text or filter_text in str(row.get(dim) or "Por verificar").casefold()
     buckets=defaultdict(lambda:{"ids":set(),"units":Counter(),"orders":set()})
     months=defaultdict(lambda:{"cases":set(),"orders":set(),"units":Counter()})
@@ -156,7 +208,7 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             orders[o["id"]]=rec
             rows['creados'].append(rec)
             state_counts[rec['state']]+=1
-            months[str(when)[:7]]["orders"].add(o["id"])
+            months[str(series_window(when,series)[0])]["orders"].add(o["id"])
             if o['shipped_at']:
                 rows["despachados"].append(rec)
     shipped_ids={r["id"] for r in rows["despachados"]}
@@ -187,6 +239,9 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             for f in findings:
                 if isinstance(f,dict):
                     reports[report["case_id"]][f.get("line_id")]=f
+    open_credits={r[0] for r in conn.execute("""SELECT n.case_id FROM credit_notes n
+           LEFT JOIN credit_applications ap ON ap.note_id=n.id GROUP BY n.id
+           HAVING COALESCE(SUM(ap.amount_milli),0)<n.total_milli""")}
     def clock(key,begin,end,rec):
         if begin and end:
             n=age(begin,end,settings["calendar"])
@@ -208,49 +263,45 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
                   "cause":reports[cid].get(l["id"],{}).get("cause")}
             if matches(dims):
                 valid_lines.append((l,dims))
-        if filter_text and not valid_lines and (lines[cid] or not matches({**cf,"client":c["client"]})):
+        if (filter_text or filters) and not valid_lines and (lines[cid] or not matches({**cf,"client":c["client"]})):
             continue
         in_period=a<=reg<=b
         sent=c["submitted_at"]
         is_active=sent and c["status"] not in ("anulado","cancelado","borrador")
         anchor = next((e["created_at"] for e in reversed(timeline) if e["action"] in ("submit","reopen")),sent)
         responsible = "calidad" if c["status"] in ("enviado","analisis","parcial") else c["channel"]
+        current_ev=[e for e in timeline if e["cycle"]==c["cycle"]]
+        commercial,completed= commercial_progress(lines[cid],current_ev,cid in open_credits)
         rec={"id":cid,"ref":f"RC-{cid}","client":c["client"] or "Sin cliente","channel":c["channel"],
              "state":STATES.get(c["status"],c["status"]),"date":str(reg),"sent":str(local_day(anchor)) if anchor else None,
              "age":age(anchor,today()) if anchor else None,"actor":timeline[-1]["actor"] if timeline else "—",
-             "last":timeline[-1]["action"] if timeline else None,
+             "commercial":commercial,"last":EVENT_LABELS.get(timeline[-1]["action"],"Actuación registrada") if timeline else None,
+             "last_at":timeline[-1]["created_at"] if timeline else None,
              "case_age":age(c["created_at"],today()),
-             "responsible":PEOPLE[responsible] if c["status"]!="cerrado" else "—",
+             "responsible":PEOPLE[responsible] if c["status"] not in ("cerrado","anulado") else "—",
              "next":NEXT_STEP.get(c["status"],"Revisar expediente"),
              "url":f"/#caso/{cid}"}
         if in_period:
             rows["casos"].append(rec)
-            months[str(reg)[:7]]["cases"].add(cid)
+            months[str(series_window(reg,series)[0])]["cases"].add(cid)
             if c["origin"]=="rsales_formulario":
                 rows["formularios"].append(rec)
             for key,names in [("revisados",("review","review_contact","review_import")),
                               ("publicados",("publish",)),("atendidos",("communicate",))]:
                 if any(ev[n] for n in names): rows[key].append(rec)
+            if any(e["action"]=="amend" and json_dict(e["payload"]).get("category")=="reincidencia" for e in by_date):
+                rows["reincidencias"].append(rec)
             if any(json_dict(e["payload"]).get("type")=="credit" for e in ev["resolve"]): rows["credito"].append(rec)
-            clock("submit",c["created_at"],sent,rec)
-            if ev["communicate"]: clock("communicate",c["created_at"],ev["communicate"][-1]["created_at"],rec)
-            if ev["dispatch"]: clock("dispatch",c["created_at"],ev["dispatch"][-1]["created_at"],rec)
+            if sent and local_day(sent)<=b: clock("submit",c["created_at"],sent,rec)
+            if completed and local_day(completed["created_at"])<=b:
+                clock("fulfilled",c["created_at"],completed["created_at"],rec)
+            comms=[e for e in by_date if e["action"]=="communicate"]
+            if comms: clock("communicate",c["created_at"],comms[-1]["created_at"],rec)
+            dispatches=[e for e in by_date if e["action"]=="dispatch"]
+            if dispatches: clock("dispatch",c["created_at"],dispatches[-1]["created_at"],rec)
             if valid_lines and any(links[l["id"]] for l,d in valid_lines): rows["vinculados"].append(rec)
         if c["status"]=="borrador" and not sent:
             rows["cola_borradores"].append(rec)
-        if not is_active:
-            if sent and a<=local_day(sent)<=b: rows["anulados"].append(rec)
-            continue
-        if c["status"] in ("enviado","analisis","informacion","parcial"):
-            rows["cola_calidad"].append(rec)
-        if c["status"]=="informacion": rows["cola_info"].append(rec)
-        current_ev=[e for e in timeline if e["cycle"]==c["cycle"]]
-        pub_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="publish"}
-        comm_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="communicate"}
-        if pub_ids and max(x or 0 for x in pub_ids) not in comm_ids:
-            rows["cola_comunicar"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Registrar la comunicación de la respuesta con el vendedor"))
-        if any(l["replacement"]>l["dispatched"] for l,d in valid_lines):
-            rows["cola_reponer"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Verificar el despacho y registrar el soporte de reposición"))
         # Reconstruct the open cycle at the inclusive cut, based on verified events.
         cycle_events=[]
         for e in by_date:
@@ -275,7 +326,11 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             full_pub=published[-1]["created_at"]
         if cycle_start and a<=local_day(cycle_start)<=b:
             rows["enviados"].append(rec)
-            if full_pub or closed:
+            ack=next((e for e in cycle_events if e["action"]=="ack"),None)
+            if ack: clock("ack",cycle_start,ack["created_at"],rec)
+            if "cancel" in actions:
+                rows["anulados"].append(rec)
+            elif full_pub or closed:
                 rows["completos"].append(rec)
                 clock("complete",cycle_start,full_pub,rec)
             else:
@@ -288,6 +343,17 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             clock("technical",c["created_at"],full_pub,rec)
             if published and not any(e["action"]=="communicate" and e["id"]>published[-1]["id"] for e in by_date):
                 rows["comunicar"].append(rec)
+        if not is_active:
+            continue
+        if c["status"] in ("enviado","analisis","informacion","parcial"):
+            rows["cola_calidad"].append(rec)
+        if c["status"]=="informacion": rows["cola_info"].append(rec)
+        pub_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="publish"}
+        comm_ids={json_dict(e["payload"]).get("report_id") for e in current_ev if e["action"]=="communicate"}
+        if pub_ids and max(x or 0 for x in pub_ids) not in comm_ids:
+            rows["cola_comunicar"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Registrar la comunicación de la respuesta con el vendedor"))
+        if any(l["replacement"]>l["dispatched"] for l,d in valid_lines):
+            rows["cola_reponer"].append(dict(rec,responsible=PEOPLE[c["channel"]], next="Verificar el despacho y registrar el soporte de reposición"))
         missing_link=False
         pending=False
         for l,d in valid_lines:
@@ -309,7 +375,7 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
                 buckets[bucket]["ids"].add(cid)
                 buckets[bucket]["units"][unit]+=qty
                 buckets[bucket]["orders"].update(x["order_id"] for x in allocated)
-                months[str(reg)[:7]]["units"][unit]+=qty
+                months[str(series_window(reg,series)[0])]["units"][unit]+=qty
                 for key in BALANCES:
                     value=max(0,(l["replacement"] or 0)-(l["dispatched"] or 0)) if key=="pending" else (l[key] or 0)
                     balances[unit][key]+=value
@@ -327,7 +393,7 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
             sql+=" AND channel=?"; params.append(channel)
         seen=set()
         for h in conn.execute(sql,params):
-            if filter_text and not matches(dict(h)): continue
+            if (filter_text or filters) and not matches(dict(h)): continue
             cid=h["case_id"]
             historical={"id":cid,"ref":h["number"],"channel":h["channel"],"date":h["case_date"],
                     "client":h["client"],"state":"Histórico por verificar","next":"Conciliar soportes","actor":"—",
@@ -351,12 +417,12 @@ def aggregate(conn,a,b,channel="",origin="",dim="client",query="",cohort="creaci
     denominator_ok=(coverage.get(channel,False) if channel else all(coverage[c] for c in CHANNELS[:2]))
     if channel in CHANNELS[:2] and conn.execute("SELECT 1 FROM rs_orders WHERE active=1 AND channel='por_clasificar' AND created BETWEEN ? AND ? LIMIT 1",(str(a),str(b))).fetchone():
         denominator_ok=False
-    denominator_ok=denominator_ok and not origin and not filter_text and cohort=="creacion"
+    denominator_ok=denominator_ok and not origin and not filter_text and not filters and cohort=="creacion"
     def rate(top,base):
         return 100*len(rows[top])/len(rows[base]) if denominator_ok and rows[base] else None
     return dict(rows=rows,counts={k:len(v) for k,v in rows.items()},balances=dict(balances),balance_details=balance_details,
                 times={k:{"n":len(time_values[k]),"median":percentile(time_values[k],.5),"p90":percentile(time_values[k],.9),
-                          "open":max(0,len(rows["enviados"] if k=="complete" else rows["casos"])-len(time_values[k]))} for k in TIMES},
+                          "open":max(0,len(rows["enviados"] if k in ("complete","ack") else rows["casos"])-len(time_values[k]))} for k in TIMES},
                 time_rows=case_ids_for_timing,hist_amounts=dict(hist_amounts),history_rows=history_rows,buckets=dict(buckets),months=dict(months),rates={"reportados":rate("reportados","creados"),
                 "confirmados":rate("confirmados","despachados")},coverage=coverage,states=dict(state_counts),settings=settings)
 
@@ -392,7 +458,7 @@ def linked_order(oid):
 
 
 def format_rate(value):
-    return "Sin base suficiente" if value is None else f"{value:.2f}".rstrip("0").rstrip(".").replace(".",",")+" %"
+    return "Sin base suficiente" if value is None else f"{value:.2f}".replace(".",",")+" %"
 
 
 @bp.get("/api/pedidos")
@@ -424,7 +490,8 @@ def dashboard():
     dim=args.get("dimension","client")
     query=args.get("buscar","")
     cohort=args.get("cohorte","creacion")
-    if channel not in ("",*CHANNELS) or origin not in ("",*ORIGINS) or dim not in DIMS or cohort not in ("creacion","salida"):
+    series=args.get("serie","mes")
+    if channel not in ("",*CHANNELS) or origin not in ("",*ORIGINS) or dim not in DIMS or series not in SERIES or cohort not in ("creacion","salida"):
         abort(400,"Filtro inválido.")
     try:
         a,b=window(args)
@@ -437,8 +504,9 @@ def dashboard():
     # One read snapshot keeps cards, detail and exports in agreement during concurrent writes.
     conn.execute("BEGIN")
     try:
-        cur=aggregate(conn,a,b,channel,origin,dim,query,cohort)
-        prev=aggregate(conn,prev_start,prev_end,channel,origin,dim,query,cohort)
+        filters={k:args.get("f_"+k,"") for k in DIMS}
+        cur=aggregate(conn,a,b,channel,origin,dim,query,cohort,series,filters)
+        prev=aggregate(conn,prev_start,prev_end,channel,origin,dim,query,cohort,series,filters)
         rev=revision(conn)
         runs=[dict(r) for r in conn.execute("SELECT * FROM rs_runs ORDER BY id DESC LIMIT 10")]
         last=conn.execute("SELECT max(finished) FROM rs_runs WHERE state='completa'").fetchone()[0]
@@ -471,6 +539,10 @@ def dashboard():
         if "detalle" in values: merged.pop("estado_pedido",None)
         merged.update(values)
         return "/indicadores?"+urlencode(merged)
+    def case_link(url):
+        if url and url.startswith("/#caso/"):
+            return "/?"+urlencode({"volver":link()+"#detalle"})+url[1:]
+        return url
     if args.get("csv")=="1":
         buf=io.StringIO()
         out=csv.writer(buf)
@@ -498,13 +570,12 @@ def dashboard():
     else: groups.sort(key=lambda g:(-abs(g["delta"]),-g["count"],g["name"]))
     month_windows={}
     for month in cur["months"]:
-        start=date.fromisoformat(month+"-01")
-        following=date(start.year+(start.month==12),start.month%12+1,1)
-        month_windows[month]=dict(periodo="rango",desde=str(max(a,start)),hasta=str(min(b,following-timedelta(days=1))))
+        start,end=series_window(date.fromisoformat(month),series)
+        month_windows[month]=dict(periodo="rango",desde=str(max(a,start)),hasta=str(min(b,end)))
     group_page=args.get("grupos",1,type=int)
     group_page=max(1,group_page)
-    return render_template("indicadores.html",data=cur,previous=prev,queues=QUEUES,labels=LABELS,origins=ORIGINS,dimensions=DIMS,
-        timings=TIMES,amounts=BALANCES,a=a,b=b,prev_start=prev_start,prev_end=prev_end,link=link,rate=format_rate,
+    return render_template("indicadores.html",data=cur,previous=prev,case_link=case_link,queues=QUEUES,labels=LABELS,origins=ORIGINS,dimensions=DIMS,
+        timings=TIMES,amounts=BALANCES,series=SERIES,serie=series,cut_time=datetime.now(BOGOTA),a=a,b=b,prev_start=prev_start,prev_end=prev_end,link=link,rate=format_rate,
         group_rows=groups[50*(group_page-1):50*group_page],group_count=len(groups),group_page=group_page,month_windows=month_windows,scope=channel or "Todos",detail_title=title,page=page,
         items=results[(page-1)*25:page*25],total=len(results),runs=runs,last=last,adapter=bool(os.getenv("RECLAMOS_RSALES_ADAPTER")),
         revision=rev,today=today(),note=args.get("aviso",""),args=args)

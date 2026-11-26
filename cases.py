@@ -2,7 +2,7 @@
 import hashlib
 import json
 import math
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import PurePath
 
@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS case_files(
  content BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS case_file_metadata ON case_files(case_id);
+CREATE TABLE IF NOT EXISTS case_file_documents(
+ file_id INTEGER PRIMARY KEY REFERENCES case_files(id), doc_key TEXT NOT NULL DEFAULT '', snapshot TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cases_reception_date ON cases(date);
 CREATE TABLE IF NOT EXISTS case_file_policy(
  file_id INTEGER PRIMARY KEY REFERENCES case_files(id), kind TEXT NOT NULL CHECK(kind IN ('technical','evidence'))
 );
@@ -138,6 +142,21 @@ def number(data, key, positive=False):
     if positive and not n:
         abort(400, "La cantidad debe ser positiva.")
     return n
+
+
+COUNTED_UNITS = {
+    "unidad", "unidades", "un", "und", "unds", "unid", "caja", "cajas", "display", "displays",
+    "balde", "baldes", "tambor", "tambores", "tanque", "tanques", "envase", "envases",
+}
+
+
+def line_quantity(data, key, unit, positive=False):
+    amount = number(data, key, positive)
+    # Una caja de 12 sigue siendo una caja; el empaque no convierte la cantidad.
+    first_word = unit.lower().partition(" ")[0].rstrip(".")
+    if first_word in COUNTED_UNITS and not amount.is_integer():
+        abort(400, f"La cantidad en {unit} debe ser entera.")
+    return amount
 
 
 def day(data, key, required=True):
@@ -248,7 +267,7 @@ def save_lines(cid, data):
             if not snapshot:
                 abort(400, "El SKU seleccionado ya no está en el catálogo. Puedes ingresarlo manualmente.")
             extras["product_snapshot"] = snapshot
-        vals.update(quantity=number(item,"quantity"),fields=encode(extras))
+        vals.update(quantity=line_quantity(item, "quantity", vals["unit"]), fields=encode(extras))
         if lid:
             if lid not in existing or lid in used:
                 abort(400, "Revisa las líneas editadas.")
@@ -315,6 +334,8 @@ def save_contact(parsed, original, filename, source_account):
 
 
 def labels(c, commercially_done=False):
+    if c["status"] == "anulado":
+        return "Anulado",""
     if c["status"] == "cerrado":
         return "Cerrado",""
     if c["status"] not in ("borrador","respondido"):
@@ -333,6 +354,8 @@ def labels(c, commercially_done=False):
 
 def balance(line):
     line["pending"]=round(line["quantity"]-sum(line[k] for k in ALLOCATION),3)
+    line["pending_dispatch"]=round(line["replacement"]-line["dispatched"],3)
+    line["pending_receipt"]=round(line["dispatched"]-line["received"],3)
     return line
 
 
@@ -357,10 +380,10 @@ def commercial_complete(c, lines):
 def accessible_files(cid, fid=None):
     # Older quality uploads default to internal. A published version grants access to that exact file.
     kind="COALESCE(p.kind, CASE WHEN f.actor='calidad' THEN 'technical' ELSE 'evidence' END)"
-    columns="f.id,f.line_id,f.actor,f.created_at,f.filename,f.size,"+kind+" AS kind"
+    columns="f.id,f.line_id,f.actor,f.created_at,f.filename,f.size,d.doc_key AS document_key,d.snapshot AS document,"+kind+" AS kind"
     if fid is not None:
         columns+=",f.content"
-    query="SELECT "+columns+" FROM case_files f LEFT JOIN case_file_policy p ON p.file_id=f.id WHERE f.case_id=?"
+    query="SELECT "+columns+" FROM case_files f LEFT JOIN case_file_policy p ON p.file_id=f.id LEFT JOIN case_file_documents d ON d.file_id=f.id WHERE f.case_id=?"
     args=[cid]
     if role() not in ("calidad","administrador"):
         query+=" AND ("+kind+"""='evidence' OR EXISTS (
@@ -370,6 +393,8 @@ def accessible_files(cid, fid=None):
         query+=" AND f.id=?"
         args.append(fid)
     files=rows(query+" ORDER BY f.id",args)
+    for file in files:
+        file["document"]=json.loads(file["document"]) if file["document"] else None
     if fid is not None and files:
         from blobs import unpack_blob
         files[0]["content"]=unpack_blob(files[0]["content"])
@@ -383,6 +408,71 @@ def evidence_for(c, file_id, line_ids=()):
     if file["line_id"] is not None and line_ids and file["line_id"] not in line_ids:
         abort(400,"El soporte pertenece a otra referencia. Selecciona evidencia de esta línea o del expediente.")
     return file["id"]
+
+
+TECHNICAL_STATES = {
+    "borrador":"Borrador", "enviado":"Enviado a Calidad · Sin acuse", "analisis":"En análisis",
+    "informacion":"Falta información del área", "parcial":"Respuesta parcial", "respondido":"Respuesta completa",
+    "cerrado":"Respuesta completa", "anulado":"Anulado",
+}
+
+
+def workflow_summary(c, lines, full=False):
+    state=c["status"]
+    communicated=is_communicated(c)
+    complete=commercial_complete(c,lines)
+    decisions=one("SELECT 1 FROM events WHERE case_id=? AND action='decision' LIMIT 1",(c["id"],))
+    fulfillment=one("SELECT 1 FROM events WHERE case_id=? AND action IN ('dispatch','resolve','credit_apply') LIMIT 1",(c["id"],))
+    if complete and communicated:
+        commercial="Cumplido"
+    elif fulfillment and not complete:
+        commercial="Cumplimiento parcial"
+    elif communicated:
+        commercial="Comunicado"
+    elif decisions or state in ("respondido","cerrado"):
+        commercial="Por comunicar" if decisions else "Por decidir"
+    else:
+        commercial="Por decidir"
+    c["commercial_status"]=commercial
+    c["technical_status"]=TECHNICAL_STATES[state]
+    c["label"],c["next_actor"]=labels(c,complete and communicated)
+    remaining=[l for l in lines if l["report_cycle"]!=c["cycle"]]
+    action={
+        "borrador":"Revisar y enviar a Calidad", "enviado":"Acusar recibo", "informacion":"Aportar la evidencia solicitada",
+        "analisis":"Analizar el expediente", "parcial":"Completar la respuesta técnica",
+        "respondido":{"Por decidir":"Registrar la decisión comercial","Por comunicar":"Comunicar la solución al cliente",
+                      "Comunicado":"Verificar la solución acordada","Cumplimiento parcial":"Verificar los compromisos pendientes",
+                      "Cumplido":"Revisar y cerrar el expediente"}[commercial],
+        "cerrado":"Expediente cerrado", "anulado":"Expediente anulado",
+    }[state]
+    if state=="parcial" and remaining:
+        action+=" · "+(remaining[0]["code"] or remaining[0]["description"] or str(remaining[0]["id"]))
+        if len(remaining)>1:
+            action+=f" y {len(remaining)-1} más"
+    c["next_action"]=action
+    if not full:
+        return
+    c["quality_progress"]={"answered":len(lines)-len(remaining),"total":len(lines),"pending_line_ids":[l["id"] for l in remaining]}
+    issues=[]
+    if state not in ("cerrado","anulado"):
+        if state not in ("respondido",):
+            issues.append("Falta completar la respuesta técnica del ciclo.")
+        if not communicated:
+            issues.append("Falta registrar la comunicación de la solución vigente.")
+        if not complete:
+            for line in lines:
+                ref=line["code"] or line["description"] or str(line["id"])
+                for key,amount in (("por decidir",line["pending"]),("por despachar",line["pending_dispatch"]),
+                                   ("con crédito por documentar",line["credit"]-line["credit_done"]),
+                                   ("con otra solución por documentar",line["other"]-line["other_done"])):
+                    if round(amount,3)>0:
+                        issues.append(f"{ref} · {amount:g} {line['unit']} {key}.")
+            if not lines:
+                issues.append("Falta acreditar la decisión y el cumplimiento del servicio.")
+            for note in c["credit_notes"]:
+                if note["remaining"]!="0":
+                    issues.append(f"Nota {note['number']} · {note['currency']} {note['remaining']} por aplicar.")
+    c["closure_issues"]=issues
 
 
 def detail(cid):
@@ -409,7 +499,7 @@ def detail(cid):
         link["number"]=link["snapshot"].get("number")
         link["code"]=link["snapshot"].get("code")
     c["credit_notes"]=credit_notes.listed(cid) if c["channel"]=="internacional" else []
-    c["label"],c["next_actor"]=labels(c, commercial_complete(c,c["lines"]) and is_communicated(c))
+    workflow_summary(c,c["lines"],full=True)
     return c
 
 
@@ -420,49 +510,93 @@ def is_communicated(c):
     return bool(row and row["action"]=="communicate")
 
 
-@bp.get("/api/cases")
-@require(*ROLES)
-def list_cases():
-    where=[]
+VERIFYING = """(submitted_at IS NOT NULL AND status NOT IN ('cerrado','anulado') AND (
+    EXISTS (SELECT n.id FROM credit_notes n LEFT JOIN credit_applications a ON a.note_id=n.id
+      WHERE n.case_id=cases.id GROUP BY n.id,n.total_milli HAVING COALESCE(SUM(a.amount_milli),0)<n.total_milli)
+    OR EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND
+      (l.replacement>l.dispatched OR l.credit>l.credit_done OR l.other>l.other_done))
+    OR EXISTS (SELECT 1 FROM events e WHERE e.case_id=cases.id AND e.cycle=cases.cycle
+      AND e.action='decision' AND json_extract(e.payload,'$.type') IN ('credit','other')
+      AND NOT EXISTS (SELECT 1 FROM events later WHERE later.case_id=e.case_id AND later.cycle=e.cycle
+      AND later.id>e.id AND later.action IN ('decision','resolve')))))"""
+
+
+def search_filter(term):
+    text=term[:220]
+    pattern="%"+text.replace("!","!!").replace("%","!%").replace("_","!_")+"%"
+    conditions=["client LIKE ? ESCAPE '!'", "CAST(id AS TEXT)=?", "cases.date LIKE ? ESCAPE '!'"]
+    args=[pattern,text.upper().removeprefix("RC-").lstrip("0"),pattern]
+    for fmt in ("%Y-%m-%d","%d/%m/%Y","%d-%m-%Y"):
+        try:
+            normalized=datetime.strptime(text,fmt).date().isoformat()
+        except ValueError:
+            continue
+        conditions.append("(cases.date=? OR date(cases.created_at,'-5 hours')=?)")
+        args.extend([normalized,normalized])
+        break
+    conditions.append("""EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND (
+       l.code LIKE ? ESCAPE '!' OR l.description LIKE ? ESCAPE '!' OR l.lot LIKE ? ESCAPE '!'
+       OR json_extract(l.fields,'$.reported_code') LIKE ? ESCAPE '!'
+       OR json_extract(l.fields,'$.client_product_code') LIKE ? ESCAPE '!'
+       OR json_extract(l.fields,'$.source_description') LIKE ? ESCAPE '!'
+       OR json_extract(l.fields,'$.documents') LIKE ? ESCAPE '!'))""")
+    args.extend([pattern]*7)
+    for key in ("documents","documentos"):
+        conditions.append(f"""EXISTS (SELECT 1 FROM json_each(cases.fields,'$.{key}') d WHERE
+          CASE WHEN d.type='object' THEN json_extract(d.value,'$.number') ELSE d.value END LIKE ? ESCAPE '!')""")
+        args.append(pattern)
+    conditions.append("""EXISTS (SELECT 1 FROM events e WHERE e.case_id=cases.id AND e.action='amend'
+            AND json_extract(e.payload,'$.document') LIKE ? ESCAPE '!')""")
+    args.append(pattern)
+    conditions.append("""EXISTS (SELECT 1 FROM credit_notes n JOIN credit_applications a ON a.note_id=n.id
+            WHERE n.case_id=cases.id AND a.doc_number LIKE ? ESCAPE '!')""")
+    args.append(pattern)
+    if one("SELECT 1 FROM sqlite_master WHERE name='rs_orders'"):
+        conditions.append("""EXISTS (SELECT 1 FROM order_links k JOIN rs_orders o ON o.id=k.order_id
+                WHERE k.case_id=cases.id AND (o.code LIKE ? ESCAPE '!' OR o.number LIKE ? ESCAPE '!'))""")
+        args.extend([pattern,pattern])
+    return "("+ " OR ".join(conditions)+")",args
+
+
+def queue_page():
+    predicates=[]
     args=[]
     if role() in CHANNELS:
-        where.append("channel=?")
+        predicates.append("channel=?")
         args.append(role())
     elif role()=="calidad":
-        where.append("submitted_at IS NOT NULL")
-    for k in ("channel","origin","status"):
-        if value:=request.args.get(k):
-            if k=="status" and value=="por_verificar":
-                where.append("""(submitted_at IS NOT NULL AND status!='cerrado' AND (
-                    EXISTS (SELECT n.id FROM credit_notes n LEFT JOIN credit_applications a ON a.note_id=n.id
-                    WHERE n.case_id=cases.id GROUP BY n.id,n.total_milli HAVING COALESCE(SUM(a.amount_milli),0)<n.total_milli)
-                    OR EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND
-                    (l.replacement>l.dispatched OR l.credit>l.credit_done OR l.other>l.other_done))
-                    OR EXISTS (SELECT 1 FROM events e WHERE e.case_id=cases.id AND e.cycle=cases.cycle
-                    AND e.action='decision' AND json_extract(e.payload,'$.type') IN ('credit','other')
-                    AND NOT EXISTS (SELECT 1 FROM events later WHERE later.case_id=e.case_id AND later.cycle=e.cycle
-                    AND later.id>e.id AND later.action IN ('decision','resolve')))))""")
-            else:
-                where.append(f"{k}=?")
-                args.append(value)
+        predicates.append("submitted_at IS NOT NULL")
+    for key in ("channel","origin"):
+        if value:=request.args.get(key):
+            predicates.append(f"{key}=?")
+            args.append(value)
     if term:=request.args.get("q","").strip():
-        match="%"+term[:220].replace("!","!!").replace("%","!%").replace("_","!_")+"%"
-        where.append("""(client LIKE ? ESCAPE '!' OR CAST(id AS TEXT)=?
-          OR EXISTS (SELECT 1 FROM case_lines l WHERE l.case_id=cases.id AND (l.code LIKE ? ESCAPE '!'
-          OR l.description LIKE ? ESCAPE '!' OR l.lot LIKE ? ESCAPE '!')))""")
-        args.extend([match,term.removeprefix("RC-").lstrip("0"),match,match,match])
-        if one("SELECT 1 FROM sqlite_master WHERE name='rs_orders'"):
-            where[-1]="("+where[-1]+""" OR EXISTS (SELECT 1 FROM order_links k JOIN rs_orders o ON o.id=k.order_id
-              WHERE k.case_id=cases.id AND (o.code LIKE ? ESCAPE '!' OR o.number LIKE ? ESCAPE '!')))"""
-            args.extend([match,match])
-    where_clause=(" WHERE "+" AND ".join(where)) if where else ""
-    total=one("SELECT COUNT(*) n FROM cases"+where_clause,args)["n"]
+        condition,bindings=search_filter(term)
+        predicates.append(condition)
+        args.extend(bindings)
+    where=" WHERE "+" AND ".join(predicates) if predicates else ""
+    counts=dict.fromkeys([*TECHNICAL_STATES,"todos","por_verificar"],0)
+    for row in rows("SELECT status,COUNT(*) n,SUM(CASE WHEN "+VERIFYING+
+                    " THEN 1 ELSE 0 END) pending FROM cases"+where+" GROUP BY status",args):
+        counts[row["status"]]=row["n"]
+        counts["todos"]+=row["n"]
+        counts["por_verificar"]+=row["pending"]
+    selected=request.args.get("status") or "todos"
+    if selected not in counts:
+        abort(400,"Estado de bandeja desconocido.")
+    if selected!="todos":
+        where+=" AND " if predicates else " WHERE "
+        if selected=="por_verificar":
+            where+=VERIFYING
+        else:
+            where+="status=?"
+            args.append(selected)
     limit=max(1,min(request.args.get("limit",50,type=int),200))
     page=max(1,request.args.get("page",1,type=int))
     sorting = {
         "age": "COALESCE(submitted_at,created_at) ASC,id",
         "channel": "channel,COALESCE(submitted_at,created_at) ASC,id",
-        "next": """CASE WHEN status='cerrado' THEN 'zz' WHEN status IN ('enviado','analisis','parcial')
+        "next": """CASE WHEN status IN ('cerrado','anulado') THEN 'zz' WHEN status IN ('enviado','analisis','parcial')
                  THEN 'calidad' ELSE channel END,COALESCE(submitted_at,created_at) ASC,id""",
         "updated": "updated_at DESC,id DESC",
     }
@@ -470,14 +604,24 @@ def list_cases():
     if not order:
         abort(400,"Criterio de ordenación desconocido.")
     result=rows("SELECT id,channel,origin,client,date,kind,status,version,cycle,created_at,updated_at,submitted_at,closed_at FROM cases"+
-                where_clause+" ORDER BY "+order+" LIMIT ? OFFSET ?",(*args,limit,limit*(page-1)))
+                where+" ORDER BY "+order+" LIMIT ? OFFSET ?",(*args,limit,limit*(page-1)))
     for c in result:
-        completed = c["status"] not in ("borrador","cerrado","respondido") and is_communicated(c) and commercial_complete(
-            c, rows("SELECT * FROM case_lines WHERE case_id=?", (c["id"],)))
-        c["label"],c["next_actor"]=labels(c, completed)
+        workflow_summary(c,rows("SELECT * FROM case_lines WHERE case_id=?",(c["id"],)))
     response=jsonify(result)
-    response.headers["X-Total-Count"]=str(total)
+    response.headers["X-Total-Count"]=str(counts[selected])
+    response.headers["X-Status-Counts"]=json.dumps(counts,separators=(",",":"))
     return response
+
+
+@bp.get("/api/cases")
+@require(*ROLES)
+def list_cases():
+    conn=db()
+    conn.execute("BEGIN")
+    try:
+        return queue_page()
+    finally:
+        conn.rollback()
 
 
 @bp.get("/api/cases/<int:cid>")
@@ -527,7 +671,7 @@ def edit_case(cid):
         if c["origin"]=="rsales_formulario":
             reason=string(data,"note")
             changes={k:{"anterior":c[k],"actual":v} for k,v in vals.items() if v!=c[k]}
-            old_lines=[{k:v for k,v in l.items() if k!="pending"} for l in old["lines"]]
+            old_lines=[{k:v for k,v in l.items() if k not in ("pending","pending_dispatch","pending_receipt")} for l in old["lines"]]
             for l in old_lines:
                 l["fields"]=encode(l["fields"])
             if old_lines!=after_lines:
@@ -558,15 +702,49 @@ def edit_case(cid):
 def submit(c):
     if c["status"]!="borrador":
         abort(409,"El expediente ya fue enviado.")
-    if not all(c[k] for k in ("client","date","description")):
-        abort(400,"Completa el cliente, la fecha y el relato antes de enviar.")
-    lines=rows("SELECT * FROM case_lines WHERE case_id=?",(c["id"],))
-    if (not lines and c["kind"]=="producto") or any(not(l["code"] or l["description"]) or l["quantity"]<=0 or not l["reason"] or not l["unit"] for l in lines):
-        abort(400,"Cada referencia requiere identificación, cantidad positiva, unidad y motivo.")
+    if not c["client"] or not c["date"]:
+        abort(400, "Completa el cliente y la fecha antes de enviar.")
+    common_reason = c["description"].strip()
+    if c["kind"] == "servicio" and not common_reason:
+        abort(400, "Escribe el relato del cliente antes de enviar la consulta de servicio.")
+    lines = rows("SELECT * FROM case_lines WHERE case_id=?", (c["id"],))
+    if not lines and c["kind"] == "producto":
+        abort(400, "Agrega al menos una referencia reclamada.")
+    for line in lines:
+        extras=json.loads(line["fields"])
+        identified=line["code"] or line["description"] or any(
+            isinstance(extras.get(k),str) and extras[k].strip() for k in ("reported_code","client_product_code","source_description"))
+        if not identified or not line["unit"]:
+            abort(400, "Cada referencia requiere identificación y unidad declarada.")
+        line_quantity(line, "quantity", line["unit"], positive=True)
+        if not line["reason"].strip() and not common_reason:
+            abort(400, "Indica el motivo de cada referencia o un relato común aplicable.")
     if c["origin"]=="rsales_formulario" and not one("SELECT 1 FROM events WHERE case_id=? AND action='review'",(c["id"],)):
         abort(409,"Guarda primero la revisión del formulario RSales.")
     bump(c,status="enviado",submitted_at=now())
     event(c,"submit",{})
+
+
+def attached_document(c, key):
+    docs=json.loads(c["fields"]).get("documents",[])
+    if not isinstance(docs,list):
+        abort(400,"Selecciona un documento guardado en el expediente.")
+    selector=None
+    if key.lstrip().startswith("{"):
+        try:
+            selector=object_value(json.loads(key))
+        except ValueError:
+            abort(400,"La referencia al documento comercial no es válida.")
+    matches=[]
+    for doc in docs:
+        if not isinstance(doc,dict) or not doc.get("number"):
+            continue
+        snapshot={k:doc.get(k) or "" for k in ("type","number","date")}
+        if (selector is not None and snapshot=={k:selector.get(k) or "" for k in snapshot}) or doc.get("key")==key:
+            matches.append((str(doc.get("key") or ""),snapshot))
+    if len(matches)!=1:
+        abort(400,"Selecciona un documento identificable de este expediente.")
+    return matches[0]
 
 
 @bp.post("/api/cases/<int:cid>/files")
@@ -582,11 +760,17 @@ def add_file(cid):
     if kind not in ("technical","evidence") or (kind=="technical" and role()!="calidad"):
         abort(400,"Selecciona una clase de archivo válida para tu rol.")
     data["kind"]=kind
+    data["document_key"]=request.form.get("document_key","").strip()
+    if data["document_key"] and data["line_id"]:
+        abort(400,"Elige como destino una referencia o un documento.")
     def save(c):
-        if c["status"]=="cerrado":
+        if c["status"] in ("anulado","cerrado"):
             abort(409,"Reabre el expediente antes de adjuntar.")
         lid=line_for(cid,data["line_id"])["id"] if data["line_id"] else None
+        document=attached_document(c,data["document_key"]) if data["document_key"] else None
         fid=record_file(c,f.filename,blob,lid,kind)
+        if document:
+            db().execute("INSERT INTO case_file_documents VALUES(?,?,?)",(fid,document[0],encode(document[1])))
         bump(c)
         event(c,"file",dict(file_id=fid,line_id=lid,filename=f.filename))
         return cid
@@ -643,7 +827,7 @@ def handle_report(c,data,action):
         string(f,"finding",publish)
         string(f,"result",publish)
         f["cause"]=string(f,"cause") or "Pendiente"
-        confirmed=number(f,"confirmed")
+        confirmed=line_quantity(f, "confirmed", line["unit"])
         if confirmed>line["quantity"]:
             abort(400,"La cantidad confirmada supera la reclamada.")
         if publish:
@@ -680,7 +864,7 @@ def handle_decision(c,data):
         event(c,"decision",payload)
         return
     line=line_for(c["id"],data.get("line_id"))
-    allocations={key:number(data,key) for key in ALLOCATION}
+    allocations={key:line_quantity(data, key, line["unit"]) for key in ALLOCATION}
     if round(sum(allocations.values()),3)>line["quantity"]:
         abort(400,"La decisión supera la cantidad reclamada.")
     for key,used in (("replacement","dispatched"),("credit","credit_done"),("other","other_done")):
@@ -708,7 +892,7 @@ def handle_movement(c,data,action):
         event(c,action,payload)
         return
     line=line_for(c["id"],data.get("line_id"))
-    qty=number(data,"quantity",True)
+    qty=line_quantity(data, "quantity", line["unit"], positive=True)
     movement={"quantity":qty,"line_id":line["id"],"date":day(data,"date"),"support":string(data,"support",True)}
     if action=="dispatch":
         balance_key,ceiling="dispatched","replacement"
@@ -741,7 +925,7 @@ def link_order(c,data):
     order=one("SELECT * FROM rs_orders WHERE id=? AND channel='nacional' AND active=1 AND type='P'",(data.get("order_id"),))
     if not order:
         abort(404,"Pedido no disponible para este canal.")
-    qty=number(data,"quantity",True)
+    qty=line_quantity(data, "quantity", line["unit"], positive=True)
     already=one("SELECT COALESCE(SUM(quantity),0) n FROM order_links WHERE line_id=? AND order_id!=?",(line["id"],order["id"]))
     if round(qty+already["n"],3)>line["quantity"]:
         abort(400,"Las cantidades vinculadas superan las reclamadas.")
@@ -771,14 +955,23 @@ def handle_action(c,data):
                                AND json_extract(payload,'$.report_id')=? AND actor=?""",(c["id"],rpt["id"],role())):
             event(c,action,{"report_id":rpt["id"]})
         return
+    if action=="cancel":
+        assert_actor("administrador")
+        if c["status"] in ("anulado","cerrado"):
+            abort(409,"El expediente ya está finalizado.")
+        note=string(data,"note",True)
+        previous=c["status"]
+        bump(c,status="anulado",closed_at=now())
+        event(c,action,{"note":note,"previous":previous})
+        return
     if action=="reopen":
         assert_actor(c["channel"],"administrador")
-        stage(c,"cerrado")
+        stage(c,"cerrado","anulado")
         note=string(data,"note",True)
-        bump(c,status="enviado",cycle=c["cycle"]+1,closed_at=None)
+        bump(c,status="enviado" if c["submitted_at"] else "borrador",cycle=c["cycle"]+1,closed_at=None)
         event(c,action,{"note":note})
         return
-    if c["status"]=="cerrado":
+    if c["status"] in ("anulado","cerrado"):
         abort(409,"Reabre el expediente para registrar nuevas actuaciones.")
     if action=="submit":
         assert_actor(c["channel"])
@@ -856,7 +1049,7 @@ def handle_action(c,data):
         if not commercial_complete(c,rows("SELECT * FROM case_lines WHERE case_id=?",(c["id"],))):
             abort(409,"Cada referencia necesita una decisión y el cumplimiento de sus compromisos.")
         bump(c,status="cerrado",closed_at=now())
-        event(c,action,{"note":string(data,"note")})
+        event(c,action,{"note":string(data,"note") or "Respuesta técnica, comunicación y cumplimiento verificados."})
     else:
         abort(400,"Acción desconocida.")
 

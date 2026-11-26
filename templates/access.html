@@ -1,7 +1,7 @@
-{% extends 'auth_base.html' %}{% block title %}Administrar accesos{% endblock %}
-{% block content %}<section class="admin"><a href="/indicadores">← Volver a indicadores</a><h1>Administrar accesos</h1>
+<!doctype html><html lang="es-CO"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Accesos · Reclamos Lubristone</title><link rel="stylesheet" href="/static/indicadores.css"></head>
+<body>{% from 'admin_nav.html' import admin_nav with context %}{{admin_nav('Accesos')}}<main id="contenido" tabindex="-1"><section class="admin"><h1>Administrar accesos</h1>
 {% if message %}<p role="status">{{ message }}</p>{% endif %}
 <div class="cards">{% for a in accounts %}<article class="card"><h2>{{ a.person }}</h2><p>{{ a.name }} · {{ 'Activa' if a.active else 'Pendiente de activación' }}</p>
 <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="account" value="{{ a.name }}">
 <label for="p-{{ a.name }}">Nueva clave</label><input id="p-{{ a.name }}" autocomplete="new-password" name="password" type="password" minlength="4" maxlength="128" required><button>{{ 'Restablecer clave' if a.active else 'Activar acceso' }}</button></form>
-</article>{% endfor %}</div><h2>Actividad de acceso</h2><div class="overflow"><table><thead><tr><th>Fecha en Colombia</th><th>Acción</th><th>Responsable</th><th>Cuenta</th></tr></thead><tbody>{% for e in events %}<tr><td>{{ e.created_at|bogota }}</td><td>{{ e.action }}</td><td>{{ e.actor }}</td><td>{{ e.target }}</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}
+</article>{% endfor %}</div><h2>Actividad de acceso</h2><div class="scroll"><table><thead><tr><th>Fecha en Colombia</th><th>Acción</th><th>Responsable</th><th>Cuenta</th></tr></thead><tbody>{% for e in events %}<tr><td>{{ e.created_at|bogota }}</td><td>{{ e.action }}</td><td>{{ e.actor }}</td><td>{{ e.target }}</td></tr>{% endfor %}</tbody></table></div></section></main></body></html>

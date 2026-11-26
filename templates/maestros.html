@@ -2,10 +2,9 @@
 <html lang="es-CO">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestros · Reclamos Lubristone</title><link rel="stylesheet" href="/static/indicadores.css"></head>
 <body>
-<header><a href="/" class="brand">LUBRISTONE</a><nav aria-label="Principal"><a href="/">Expedientes</a><a href="/indicadores">Indicadores</a><a href="/historico">Histórico</a><a href="/accesos">Accesos</a></nav></header>
-<main>
+{% from 'admin_nav.html' import admin_nav with context %}{{admin_nav()}}<main id="contenido" tabindex="-1">
 <h1>Catálogos y directorios</h1>
-{% if result=='completa' %}<p role="status">El nuevo corte completo está disponible para las áreas.</p>{% elif result=='parcial' %}<p role="alert">La actualización quedó pendiente. Revisa la configuración del adaptador y el historial de lecturas.</p>{% endif %}
+{% if result=='factor' %}<p role="status">Equivalencia de empaque confirmada.</p>{% elif result=='completa' %}<p role="status">El nuevo corte completo está disponible para las áreas.</p>{% elif result=='parcial' %}<p role="alert">La actualización quedó pendiente. Revisa la configuración del adaptador y el historial de lecturas.</p>{% endif %}
 <section><h2>Último corte completo</h2>
 {% if loaded %}
 <p>Publicado el {{ loaded|bogota }} · Hora de Colombia</p>
@@ -24,4 +23,15 @@
 {% if runs %}<table><thead><tr><th>Inicio</th><th>Estado</th><th>Páginas</th><th>Productos</th><th>Clientes</th><th>Fin</th></tr></thead>
 <tbody>{% for run in runs %}<tr><td>{{run.started|bogota}}</td><td>{{run.state|capitalize}}</td><td>{{run.pages if run.pages!=none else '—'}}</td><td>{{run.products if run.products!=none else '—'}}</td><td>{{run.clients if run.clients!=none else '—'}}</td><td>{{run.finished|bogota}}</td></tr>{% endfor %}</tbody></table>
 {% else %}<p>Sin lecturas del adaptador registradas.</p>{% endif %}
+</section>
+<section><h2>Equivalencias de empaque</h2>
+<p>Registra las unidades individuales por empaque solo cuando exista respaldo para ese SKU y presentación.</p>
+<form class="filters" action="/maestros/equivalencia-empaque" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>SKU completo<input name="code" required></label><label>Unidades individuales por empaque<input type="number" min="1" step="1" name="units" required></label>
+<label>Documento o fuente de verificación<input name="source" maxlength="500" required></label>
+<label>Versión vigente (0 para la primera)<input type="number" min="0" value="0" name="version" required></label>
+<button>Confirmar equivalencia</button></form>
+{% if factors %}<table><thead><tr><th>SKU</th><th>Descripción verificada</th><th>Empaque</th><th>Unidades</th><th>Versión</th><th>Fuente</th></tr></thead>
+<tbody>{% for f in factors %}<tr><td>{{f.code}}</td><td>{{f.description}}</td><td>{{f.presentation}}</td><td>{{f.units}}</td><td>{{f.version}}</td><td>{{f.source}}</td></tr>{% endfor %}</tbody></table>{% endif %}
 </section></main></body></html>

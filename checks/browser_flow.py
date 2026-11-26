@@ -114,8 +114,21 @@ def exercise(directory, browser):
         assert state["status"] == "respondido" and state["reports"][-1]["status"] == "published"
         assert state["lines"][0]["confirmed"] == 3
         admin.goto(base + "/indicadores")
-        admin.get_by_role("link", name="Respuestas por comunicar").click()
+        admin.get_by_role("link", name="Respuesta por comunicar").click()
         expect(admin.locator("#detalle")).to_contain_text("Empresa de prueba")
+        national.set_viewport_size({"width":390,"height":810})
+        national.get_by_role("button", name="Menú", exact=True).click()
+        national.get_by_role("link",name="Historial",exact=True).click()
+        expect(national.get_by_role("heading", name="Historial", exact=True)).to_be_visible()
+        national.locator('#filters [name=q]').fill("Empresa de prueba")
+        expect(national.locator('[data-state=todos], [data-state=""]').first).to_have_text("1")
+        national.locator(".mobile-case").get_by_role("link",name="RC-"+cid,exact=False).click()
+        expect(national.locator("#case-summary")).to_contain_text("Estado técnico")
+        expect(national.locator("#case-summary")).to_contain_text("Gestión comercial")
+        national.get_by_role("button",name="Historial de actuaciones",exact=True).click()
+        expect(national.locator("#case-timeline")).to_be_focused()
+        national.get_by_role("link",name="Volver al historial").click()
+        expect(national.locator('#filters [name=q]')).to_have_value("Empresa de prueba")
         assert not errors, errors
         print("Cuatro sesiones, activación, cinco anchos, alta, envío, acuse, respuesta compartida y detalle de gerencia verificados en Chromium.")
     finally:

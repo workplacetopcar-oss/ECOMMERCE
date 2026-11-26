@@ -335,3 +335,68 @@ def test_attachments_must_belong_to_the_case_and_reference(team):
     act(source,c,"amend",400,line_id=second["id"],file_id=fid,note="Inspección")
     c=act(source,c,"amend",line_id=first["id"],file_id=fid,note="Inspección")
     assert c["events"][-1]["payload"]["file_id"]==fid
+
+
+def test_filtered_inbox_counts_search_dates_documents_and_permissions(team):
+    import json
+
+    national,intl,quality=team["nacional"],team["internacional"],team["calidad"]
+    data=dict(opening(),fields={"documents":[{"type":"factura","number":"INV-0042","date":"2026-11-24"}]})
+    data["lines"][0]["fields"]={"documents":"OC-LINEA","reported_code":"DOC-PRODUCT"}
+    draft=post(national,"/api/cases",data)
+    sent=post(national,"/api/cases",dict(data,submit=True))
+    abroad=post(intl,"/api/cases",dict(data,submit=True))
+    c=act(team["administrador"],sent,"decision",line_id=sent["lines"][0]["id"],replacement=1,
+          authorized_by="Gerencia",note="Cortesía parcial")
+    c=act(national,c,"amend",category="documento",document="OC-EXTRA",note="Documento verificado")
+    for q in ("INV-0042","OC-LINEA","DOC-PRODUCT","2026-11-24","24/11/2026"):
+        r=national.get("/api/cases",query_string={"q":q,"status":"borrador","limit":1})
+        counts=json.loads(r.headers["X-Status-Counts"])
+        assert counts["todos"]==2 and counts["borrador"]==1 and counts["enviado"]==1
+        assert counts["por_verificar"]==1 and r.headers["X-Total-Count"]=="1" and r.json[0]["id"]==draft["id"]
+    r=quality.get("/api/cases?q=INV-0042&channel=internacional")
+    assert r.json[0]["id"]==abroad["id"]
+    assert json.loads(r.headers["X-Status-Counts"])["borrador"]==0
+    assert not national.get("/api/cases?q=INV-0042&channel=internacional").json
+    assert not intl.get("/api/cases?q=OC-EXTRA").json
+    assert national.get("/api/cases?q=OC-EXTRA").json[0]["id"]==c["id"]
+    r=national.get("/api/cases?status=por_verificar&q=INV-0042")
+    assert set(d["id"] for d in r.json)=={c["id"]}
+
+
+def test_file_by_document_and_cancellation_preserves_audit(team):
+    import json
+
+    intl,admin=team["internacional"],team["administrador"]
+    doc={"key":"D-TEST","type":"factura","number":"000A","date":"2026-11-24"}
+    c=post(intl,"/api/cases",dict(opening(),fields={"documents":[doc]}))
+    url=f"/api/cases/{c['id']}"
+    def attach(which,**extra):
+        return intl.post(url+"/files",data={"version":str(c["version"]),"document_key":which,
+            "file":(io.BytesIO(b"Copia"),"factura.txt"),**extra},headers={"Idempotency-Key":uuid4().hex})
+    assert attach("Documento-de-otro-caso").status_code==400
+    assert attach("D-TEST",line_id=str(c["lines"][0]["id"])).status_code==400
+    c=attach(json.dumps({k:doc[k] for k in ("type","number","date")})).json
+    saved=c["files"][0]
+    assert saved["document_key"]=="D-TEST" and saved["document"]["number"]=="000A"
+    assert team["nacional"].get(url+"/files/"+str(saved["id"])).status_code==404
+    c=act(intl,c,"submit")
+    assert c["technical_status"]=="Enviado a Calidad · Sin acuse"
+    assert c["commercial_status"]=="Por decidir" and c["closure_issues"]
+    act(intl,c,"cancel",403,note="Intento sin permiso")
+    act(admin,c,"cancel",400)
+    c=act(admin,c,"cancel",note="Duplicado confirmado")
+    assert c["status"]=="anulado" and c["next_actor"]==""
+    assert c["events"][-1]["payload"]["note"]=="Duplicado confirmado"
+    assert c["files"][0]["id"]==saved["id"] and len(c["lines"])==2
+    act(intl,c,"amend",409,note="No procede")
+    c=act(admin,c,"reopen",note="Conciliación completada")
+    assert c["cycle"]==2 and c["status"]=="enviado" and c["quality_progress"]["total"]==2
+    assert intl.get(url+"/files/"+str(saved["id"])).status_code==200
+
+
+def test_source_only_reference_accepted(team):
+    c=post(team["internacional"],"/api/cases",dict(opening(),submit=True,lines=[{
+        "fields":{"client_product_code":"52832-Demo"},"quantity":2,"unit":"unidad","reason":"Fuga"}]))
+    assert c["status"]=="enviado" and not c["lines"][0]["code"]
+    assert team["internacional"].get("/api/cases?q=52832-Demo").json[0]["id"]==c["id"]

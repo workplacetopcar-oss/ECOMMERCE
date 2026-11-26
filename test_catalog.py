@@ -97,6 +97,59 @@ class CatalogTest(unittest.TestCase):
         self.login("internacional")
         self.assertEqual(self.client.get("/api/catalog/equivalences?client_id=01").get_json()["items"],[])
 
+    def test_product_label_alias_and_factor_require_approval(self):
+        self.write_cut()
+        product=dict(code="TEST-B",description="Refrigerante verde x 12 de 500 ml [CAJA]",reference=None,
+                     group_code="automotriz",family_code="refrigerante",line_code="refrigerante",tax=0,
+                     state="Y",presentacion_etiquetada="CAJA")
+        with self.app.app_context():
+            conn=db()
+            conn.execute("INSERT INTO catalog_products VALUES(?,?,?,?)",
+                         (product["code"],1,catalog.indexed(*product.values()),catalog.encode(product)))
+            card=dict(nombre="Refrigerante Verde",alias=["coolant green"])
+            conn.execute("INSERT INTO catalog_cards VALUES(?,?,?,?)",
+                         ("color",card["nombre"],"refrigerante verde coolant green",catalog.encode(card)))
+        item=self.client.get("/api/catalog/products?q=coolant+green").get_json()["items"][0]
+        self.assertEqual((item["code"],item["tamano_etiquetado"],item["color_etiquetado"]),("TEST-B","500 ml","verde"))
+        self.assertIsNone(item["factor_verificado"])
+        payload=dict(code=item["code"],units=12,source="Ficha confirmada de prueba",version=0)
+        self.assertEqual(self.client.post("/maestros/equivalencia-empaque",data=payload).status_code,403)
+        self.login("administrador")
+        self.assertEqual(self.client.post("/maestros/equivalencia-empaque",data=payload).status_code,303)
+        self.assertEqual(self.client.post("/maestros/equivalencia-empaque",data=payload).status_code,409)
+        item=self.client.get("/api/catalog/products?q=TEST-B").get_json()["items"][0]
+        self.assertEqual(item["factor_verificado"]["units"],12)
+        with self.app.app_context():
+            product["description"]="Cambio de formulación [CAJA]"
+            db().execute("UPDATE catalog_products SET data=? WHERE code=?",(catalog.encode(product),item["code"]))
+            self.assertIsNone(catalog.product_snapshot(db(),item["code"])["factor_verificado"])
+
+    def test_attachment_thumbnail_requires_case_and_decodes_raster(self):
+        from PIL import Image
+        record=self.client.post("/api/cases",json={"client":"Prueba","kind":"servicio"},
+                                headers={"Idempotency-Key":"create-image-test"}).get_json()
+        output=io.BytesIO()
+        Image.new("RGB",(400,300),"red").save(output,"PNG")
+        cid=record["id"]
+        updated=self.client.post(f"/api/cases/{cid}/files",data={"file":(io.BytesIO(output.getvalue()),"foto.png"),
+                                 "version":record["version"]},headers={"Idempotency-Key":"photo"}).get_json()
+        fid=updated["files"][0]["id"]
+        url=f"/api/cases/{cid}/files/{fid}/foto"
+        response=self.client.get(url)
+        self.assertEqual(response.status_code,200)
+        with Image.open(io.BytesIO(response.data)) as result:
+            self.assertEqual(result.size,(240,180))
+            self.assertEqual(result.format,"JPEG")
+        response.close()
+        changed=self.client.post(f"/api/cases/{cid}/files",data={"file":(io.BytesIO(b"plain file"),"fake.jpg"),
+                                 "version":updated["version"]},headers={"Idempotency-Key":"not-a-photo"}).get_json()
+        invalid=changed["files"][-1]["id"]
+        self.assertEqual(self.client.get(f"/api/cases/{cid}/files/{invalid}/foto").status_code,415)
+        self.login("internacional")
+        self.assertEqual(self.client.get(url).status_code,404)
+        self.login("calidad")
+        self.assertEqual(self.client.get(url).status_code,404)
+
     def test_invalid_refresh_preserves_directory(self):
         self.write_cut()
         path = self.data / "productos_rsales.json"
@@ -232,6 +285,10 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual([len(l["fotos"]) for l in parsed["lineas"]],[3,3,3])
         self.assertEqual(list(parsed["calidad_fuente"].values()),[None]*6)
         cid = self.client.post("/api/contacto/import",json={"token":p["token"]}).get_json()["id"]
+        edited=self.preview(raw+b"\n%revision de prueba")
+        self.assertTrue(edited["source_changed"])
+        self.assertEqual(edited["existing_case"],cid)
+        self.assertEqual(edited["source_differences"],{})
         self.assertEqual(cid,self.client.post("/api/contacto/import",json={"token":p["token"]}).get_json()["id"])
         with self.app.app_context():
             self.assertEqual(db().execute("SELECT count(*) FROM case_files").fetchone()[0],1)

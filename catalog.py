@@ -11,6 +11,8 @@ import sys
 import time
 import unicodedata
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections import Counter
 from pathlib import Path
 
@@ -53,6 +55,10 @@ def init_catalog(conn):
       id TEXT PRIMARY KEY,name TEXT NOT NULL,search TEXT NOT NULL,data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS catalog_codes (
       client_id TEXT NOT NULL,code TEXT NOT NULL, data TEXT NOT NULL,PRIMARY KEY(client_id,code));
+    CREATE TABLE IF NOT EXISTS catalog_pack_factors (
+      code TEXT NOT NULL, version INTEGER NOT NULL, description TEXT NOT NULL, presentation TEXT NOT NULL,
+      units INTEGER NOT NULL CHECK(units>=1), source TEXT NOT NULL, approved_at TEXT NOT NULL,
+      actor TEXT NOT NULL, PRIMARY KEY(code,version));
     CREATE TABLE IF NOT EXISTS catalog_equivalences (
       channel TEXT NOT NULL,client_id TEXT NOT NULL,reported_code TEXT NOT NULL,
       presentation TEXT NOT NULL,version INTEGER NOT NULL,sku TEXT NOT NULL,reason TEXT NOT NULL,
@@ -149,9 +155,28 @@ def import_catalog(conn, private_dir):
     return meta
 
 
+def product_view(conn, product):
+    # Read only literal color/size labels. A count of packages is not a verified net volume.
+    description = product["description"]
+    colors = re.findall(r"\b(?:verde|rojo|roja|azul|amarillo|amarilla|naranja|negro|negra|blanco|blanca|violeta|morado|rosado|transparente)\b",
+                        description, re.IGNORECASE)
+    size = next((m[0] for m in re.finditer(
+        r"\b[0-9]+(?:[.,][0-9]+)?\s*(?:ml|cm3|cc|l|lt|litros?|galones?|galón|gl|kg|g|oz)\b",description,re.I)
+        if not re.search(r"\bx\s*$",description[:m.start()],re.I)), "")
+    if not size:
+        token = re.search(r"\b(?:litros?|galón|galones?|gl|lt)\b", description,re.I)
+        size = token[0] if token else ""
+    factor = conn.execute("SELECT units,source,presentation,version,approved_at,actor FROM catalog_pack_factors "
+                          "WHERE code=? AND version=(SELECT max(version) FROM catalog_pack_factors WHERE code=?) "
+                          "AND description=? AND presentation=?", (product["code"],product["code"],description,
+                          product.get("presentacion_etiquetada"))).fetchone()
+    return dict(product,color_etiquetado=" / ".join(dict.fromkeys(colors)),tamano_etiquetado=size,
+                factor_verificado=dict(factor) if factor else None)
+
+
 def product_snapshot(conn, code):
     row = conn.execute("SELECT data FROM catalog_products WHERE code=?", (code,)).fetchone()
-    return json.loads(row[0]) if row else None
+    return product_view(conn, json.loads(row[0])) if row else None
 
 
 def channel_scope():
@@ -166,10 +191,29 @@ def search_rows(table, exact, filters, args, synonyms=False):
     page = max(1, request.args.get("page", 1, type=int))
     limit = max(1, min(100, request.args.get("page_size", 25, type=int)))
     query = norm(request.args.get("q", "").strip()[:180])
-    for word in query.split()[:12]:
-        terms = ALIASES.get(word, (word,)) if synonyms else (word,)
-        filters.append("(" + " OR ".join("instr(search,?)>0" for _ in terms) + ")")
-        args.extend(terms)
+    alternatives = [query]
+    if synonyms and query:
+        # Translate documented aliases to their canonical product name without choosing a SKU.
+        # The operator still chooses among sizes, colors, presentations and historical variants.
+        for row in db().execute("SELECT data FROM catalog_cards"):
+            card = json.loads(row[0])
+            name = " ".join(w for w in norm(card["nombre"]).split() if w not in ("de","la","el","y"))
+            for alias in card["alias"]:
+                term = norm(alias).strip()
+                match = re.search(r"(?<!\w)"+re.escape(term)+r"(?!\w)", query) if term else None
+                if match:
+                    alternatives.append(query[:match.start()]+name+query[match.end():])
+    searches = []
+    for variant in dict.fromkeys(alternatives):
+        and_words = []
+        for word in variant.split()[:12]:
+            terms = ALIASES.get(word, (word,)) if synonyms else (word,)
+            and_words.append("(" + " OR ".join("instr(search,?)>0" for _ in terms) + ")")
+            args.extend(terms)
+        if and_words:
+            searches.append("("+" AND ".join(and_words)+")")
+    if searches:
+        filters.append("("+" OR ".join(searches)+")")
     where = " AND ".join(filters) or "1"
     conn = db()
     total = conn.execute(f"SELECT count(*) FROM {table} WHERE {where}", args).fetchone()[0]
@@ -232,16 +276,43 @@ def masters_admin():
         return redirect(url_for("catalog.masters_admin"), code=303)
     row = conn.execute("SELECT metadata,loaded_at FROM catalog_snapshot").fetchone()
     runs = conn.execute("SELECT * FROM catalog_runs ORDER BY id DESC LIMIT 30").fetchall()
-    return render_template("maestros.html",meta=json.loads(row[0]) if row else {},
+    factors = conn.execute("SELECT p.* FROM catalog_pack_factors p JOIN (SELECT code,max(version) AS version "
+                           "FROM catalog_pack_factors GROUP BY code) latest USING(code,version) "
+                           "ORDER BY p.approved_at DESC LIMIT 50").fetchall()
+    return render_template("maestros.html",factors=factors,meta=json.loads(row[0]) if row else {},
                            loaded=row[1] if row else None,runs=runs,configured=configured,
                            result=session.pop("catalog_refresh_result",None))
+
+
+@bp.post("/maestros/equivalencia-empaque")
+@require("administrador")
+def confirm_pack_factor():
+    code = request.form.get("code","").strip()
+    source = request.form.get("source","").strip()
+    units = request.form.get("units",type=int)
+    if not units or not 1 <= units <= 1_000_000 or not source or len(source)>500:
+        abort(400, description="Indicá una cantidad entera positiva y el documento que respalda la equivalencia.")
+    conn = db()
+    with transaction(conn):
+        item = product_snapshot(conn, code)
+        if not item or item.get("presentacion_etiquetada") not in {"CAJA","DISPLAY","BALDE","TAMBOR","TANQUE"}:
+            abort(400, description="Seleccioná un SKU con empaque comercial identificado en el maestro.")
+        current = conn.execute("SELECT coalesce(max(version),0) FROM catalog_pack_factors WHERE code=?", (code,)).fetchone()[0]
+        if current != request.form.get("version", 0, type=int):
+            abort(409, description="Revisá la versión publicada para este SKU antes de reemplazarla.")
+        conn.execute("INSERT INTO catalog_pack_factors VALUES(?,?,?,?,?,?,?,?)",
+                     (code,current+1,item["description"],item["presentacion_etiquetada"],units,source,now(),role()))
+    session["catalog_refresh_result"] = "factor"
+    return redirect(url_for("catalog.masters_admin"), code=303)
 
 
 @bp.get("/api/catalog/products")
 @require("nacional", "internacional", "administrador", "calidad")
 def products():
     filters = [] if request.args.get("inactive") == "1" else ["active=1"]
-    return jsonify(search_rows("catalog_products", "code", filters, [], True))
+    data = search_rows("catalog_products", "code", filters, [], True)
+    data["items"] = [product_view(db(), p) for p in data["items"]]
+    return jsonify(data)
 
 
 @bp.get("/api/catalog/cards")
@@ -261,6 +332,11 @@ def clients():
                         ORDER BY p.version DESC LIMIT 1)='Colombia')""")
     result = search_rows("catalog_clients", "id", filters, [channel])
     for c in result["items"]:
+        raw = c.get("raw",{})
+        c.setdefault("region",raw.get("region", raw.get("region_departamento","")))
+        c["rsales_code"] = raw.get("code","") if not c.get("source")=="Alta manual" and channel=="nacional" else ""
+        c["aliases"] = raw.get("alias",[]) if channel=="internacional" else [
+            v for v in (raw.get("name_est"),raw.get("short_name")) if v and v!=c["name"]]
         c.update(profile(db(), channel, c["id"]))
     return jsonify(result)
 
@@ -292,7 +368,7 @@ def save_client():
         abort(400)
     if form.get("id"):
         abort(409, description="La ficha ya existe. Guardá los datos de contacto en su perfil.")
-    record = text_fields(form, ("name","country","tax_id","city","contact","phone","email","address","source_note"))
+    record = text_fields(form, ("name","country","tax_id","city","region","contact","phone","email","address","source_note"))
     if not record["name"]:
         abort(400, description="Ingresá la razón social.")
     if channel == "nacional" and record["country"] and norm(record["country"]) != "colombia":
@@ -310,7 +386,7 @@ def save_profile(rid):
     form = request.get_json()
     if not isinstance(form, dict):
         abort(400)
-    updates = text_fields(form, ("contact","phone","email","address","city","source_note"))
+    updates = text_fields(form, ("contact","phone","email","address","city","region","source_note"))
     if channel == "nacional" and "country" in form:
         country = text_fields(form, ("country",))["country"]
         if norm(country) not in ("", "colombia"):
@@ -437,8 +513,18 @@ def preview_contact():
                       encode(parsed),stored))
     existing = conn.execute("SELECT case_id FROM contact_sources WHERE account=? AND request_id=?",
                             (SOURCE, contact_key(parsed,raw))).fetchone()
+    source_changed = False
+    differences = {}
+    if existing:
+        previous = conn.execute("SELECT digest,parsed FROM contact_versions WHERE case_id=? ORDER BY file_id DESC LIMIT 1",
+                                (existing[0],)).fetchone()
+        source_changed = bool(previous and previous["digest"] != hashlib.sha256(raw).hexdigest())
+        if source_changed:
+            old = json.loads(previous["parsed"]).get("fields",{}).get("contacto",{})
+            differences = {key:dict(anterior=old.get(key),actual=parsed.get(key))
+                           for key in sorted(old.keys()|parsed.keys()) if old.get(key)!=parsed.get(key)}
     return jsonify(parsed=parsed, warning=warning, token=token, existing_case=existing[0] if existing else None,
-                   client_candidates=proposed_client(conn, parsed))
+                   source_changed=source_changed, source_differences=differences, client_candidates=proposed_client(conn,parsed))
 
 
 def contact_preview(token):
@@ -496,6 +582,26 @@ def case_photo(cid,fid,campo):
     return send_contact_photo(source,files[0]["content"],campo)
 
 
+@bp.get("/api/cases/<int:cid>/files/<int:fid>/foto")
+@require("nacional","internacional","calidad","administrador")
+def attached_image(cid,fid):
+    from cases import get_case, accessible_files
+    get_case(cid)
+    files = accessible_files(cid,fid)
+    if not files:
+        abort(404)
+    # Validate the actual bytes. User-supplied filenames, MIME types and SVG markup
+    # cannot turn an arbitrary attachment into an inline document under the app origin.
+    max_side = "1800" if request.args.get("vista") == "ampliada" else "240"
+    try:
+        image = subprocess.run([sys.executable,str(Path(__file__).with_name("evidencia.py")),max_side],
+                               input=files[0]["content"],timeout=8,check=True,
+                               stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout
+    except subprocess.SubprocessError:
+        abort(415,description="El archivo se puede descargar desde el expediente.")
+    return send_file(io.BytesIO(image),mimetype="image/jpeg",download_name="evidencia.jpg",max_age=0)
+
+
 def case_from_contact(parsed):
     fields = dict(contacto=parsed)
     for source, target in (("vendedor","seller"),("ciudad","city"),("contacto","contact"),
@@ -509,9 +615,10 @@ def case_from_contact(parsed):
         lines.append(dict(code="",description=row["descripcion"],quantity=qty,
                           unit="unidad",reason=row["motivo"],lot="",presentation="",
                           fields=dict(reported_code=row["codigo_origen"],source_quantity=row["cantidad"],
+                                      source_description=row["descripcion"],source_unit="unidad",
                                       fotos=row["fotos"])))
     return dict(request_id=parsed.get("id_solicitud"), client=parsed.get("cliente",""),
-                date=parsed.get("fecha",""), description="; ".join(dict.fromkeys(
+                date=datetime.now(ZoneInfo("America/Bogota")).date().isoformat(), description="; ".join(dict.fromkeys(
                     line["reason"] for line in lines if line["reason"])), fields=fields, lines=lines)
 
 

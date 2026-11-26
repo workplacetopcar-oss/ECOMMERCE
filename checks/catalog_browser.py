@@ -59,9 +59,14 @@ def verify(root, directory, browser):
         expect(first).to_contain_text("Pregunta")
         expect(national.locator('[name="f_city"]')).not_to_have_value("")
         expect(national.locator('[name="f_seller"]')).not_to_have_value("")
+        original_description=first.locator('[name="source_description"]').input_value()
+        assert original_description
         first.locator(".search-input").fill("3601")
         first.locator("[data-pick]").filter(has_text="3601M").click()
         expect(first.locator('[name="code"]')).to_have_value("3601M")
+        expect(first.locator('[name="source_description"]')).to_have_value(original_description)
+        expect(first.locator('[name="color"]')).to_have_value("verde")
+        expect(first.locator('.line-source-note')).to_contain_text("3601M")
         expect(first.locator('[name="quantity"]')).to_have_value("22")
         expect(first.locator('[name="unit"]')).to_have_value("unidad")
         first.get_by_text("Datos de la selección comercial",exact=True).click()
@@ -81,7 +86,8 @@ def verify(root, directory, browser):
         intl_line=international.locator("[data-line]").first
         intl_line.get_by_text("Códigos del cliente y equivalencias verificadas").click()
         intl_line.locator("select[data-document-code]").select_option("0")
-        expect(intl_line.locator('[name="reported_code"]')).not_to_have_value("")
+        expect(intl_line.locator('[name="client_product_code"]')).not_to_have_value("")
+        expect(intl_line.locator('[name="reported_code"]')).to_have_value("")
         expect(intl_line.locator('[name="code"]')).to_have_value("")
         intl_line.locator(".search-input").fill("3601D")
         intl_line.locator("[data-pick]").first.click()
@@ -101,6 +107,7 @@ def verify(root, directory, browser):
         admin.locator("#username").fill("administrador")
         admin.locator("#password").fill(creds["administrador"])
         admin.get_by_role("button",name="Ingresar").click()
+        assert admin.request.get(base+"/indicadores").ok
         admin.goto(base+"/maestros")
         expect(admin.locator("main")).to_contain_text("8822")
         assert not errors, errors

@@ -163,6 +163,15 @@ def test_live_board_refresh_preserves_filter(tmp_path):
             page.set_viewport_size({"width":390,"height":844})
             assert all(label=="Sin base suficiente" for label in page.locator(".missing-base").all_text_contents())
             assert page.locator(".missing-base").count()>=2
+            menu=page.locator(".admin-menu")
+            pw.expect(menu.locator("nav")).to_be_hidden()
+            menu.locator("summary").focus()
+            page.keyboard.press("Enter")
+            pw.expect(menu.locator("nav")).to_be_visible()
+            assert menu.locator("a").all_text_contents()==["Seguimiento","Indicadores","Historial","Accesos"]
+            page.keyboard.press("Enter")
+            pw.expect(menu.locator("nav")).to_be_hidden()
+
             first=page.locator("a[href*='detalle=cola_calidad'] strong")
             pw.expect(first).to_have_text("0")
             page.locator("input[name=buscar]").fill("texto en edición")
@@ -173,6 +182,13 @@ def test_live_board_refresh_preserves_filter(tmp_path):
             pw.expect(first).to_have_text("1",timeout=12000)
             assert page.locator("input[name=buscar]").input_value()=="texto en edición"
             assert page.locator("input[name=buscar]").evaluate("e => e===document.activeElement")
+            page.goto(f"http://127.0.0.1:{server.server_port}/indicadores?detalle=cola_calidad&canal=nacional")
+            href=page.locator("#detalle tbody tr a").first.get_attribute("href")
+            from urllib.parse import parse_qs,urlsplit
+            target=urlsplit(href)
+            assert target.fragment.startswith("caso/")
+            return_url=parse_qs(target.query)["volver"][0]
+            assert return_url.startswith("/indicadores?") and "canal=nacional" in return_url and return_url.endswith("#detalle")
             browser.close()
     finally:
         server.shutdown()
@@ -223,7 +239,7 @@ def test_admin_five_queues_link_exact_cases_and_actions(tmp_path):
             if person: assert i["responsible"]==person
     board=admin.get("/indicadores").get_data(as_text=True)
     for title in ("Borradores sin enviar","En Calidad sin respuesta completa","Falta información del área",
-                  "Respuestas por comunicar","Reposiciones por verificar"):
+                  "Respuesta por comunicar","Reposición por verificar"):
         assert f"<span>{title}</span>" in board
     a=post("nacional","/api/cases",opening())
     b=post("internacional","/api/cases",opening())
@@ -251,3 +267,38 @@ def test_admin_five_queues_link_exact_cases_and_actions(tmp_path):
     for qty in (1,1):
         a=act("nacional",a,"dispatch",line_id=lid,quantity=qty,date=a["date"],support="Guía de prueba")
         queue("cola_reponer",[a["id"]] if a["lines"][0]["dispatched"]==1 else [])
+
+
+def test_timing_saldos_filters_and_cancelled_cohort():
+    from metrics import format_rate, series_window
+    t=MetricsTest()
+    t.setUp()
+    cid,lid=t.claim(0,None,4,2)
+    conn=t.c
+    conn.execute("""UPDATE cases SET fields='{"stage":"bodega","seller":"Ana"}' WHERE id=?""",(cid,))
+    conn.execute("UPDATE case_lines SET replacement=2,dispatched=2,received=1,credit=2,credit_done=2 WHERE id=?",(lid,))
+    for action,at,payload in [
+        ("ack","2026-10-12",{}),("decision","2026-10-12",{"replacement":2,"credit":2}),
+        ("dispatch","2026-10-16",{"quantity":2}),("receipt","2026-10-17",{"quantity":1}),
+        ("resolve","2026-10-18",{"type":"credit","quantity":2})
+    ]:
+        conn.execute("""INSERT INTO events(case_id,actor,channel,created_at,version,cycle,action,payload)
+             VALUES (?,'administrador','nacional',?,1,1,?,?)""",(cid,at,action,json.dumps(payload)))
+    data=aggregate(conn,t.a,t.b,"nacional",series="semana",extra={"stage":"bodega","seller":"ana"})
+    assert data["times"]["ack"]["median"]==2
+    assert data["times"]["fulfilled"]["median"]==8
+    assert set(data["months"])=={"2026-10-05"}
+    assert data["balances"]["unidad"]["received"]==1
+    assert data["balances"]["unidad"]["credit_done"]==2
+    assert data["time_rows"]["fulfilled"][0]["commercial"]=="Compromisos cumplidos"
+    assert aggregate(conn,t.a,t.b,"nacional",extra={"stage":"uso","seller":"ana"})["counts"]["casos"]==0
+    assert format_rate(4)=="4,00 %" and format_rate(3.75)=="3,75 %"
+    assert series_window(date(2026,12,28),"trimestre")== (date(2026,10,1),date(2026,12,31))
+    conn.execute("UPDATE cases SET status='anulado' WHERE id=?",(cid,))
+    conn.execute("""INSERT INTO events(case_id,actor,channel,created_at,version,cycle,action,payload)
+         VALUES (?,'administrador','nacional','2026-10-27',2,1,'cancel','{}')""",(cid,))
+    g=t.agg()
+    assert (g["counts"]["enviados"],g["counts"]["anulados"],g["counts"]["cola_calidad"])==(1,1,0)
+    earlier=aggregate(conn,t.a,date(2026,10,26),"nacional")
+    assert earlier["counts"]["anulados"]==0 and earlier["counts"]["pendientes"]==1
+    conn.close()

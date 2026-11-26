@@ -1,0 +1,16 @@
+{% macro admin_nav(active='') -%}
+<a class="skip-link" href="#contenido">Saltar al contenido</a>
+<header class="navigation">
+  <a class="brand" href="/indicadores"><strong>LUBRISTONE</strong><span>Reclamos y Calidad</span></a>
+  <details class="admin-menu">
+    <summary>Menú de administración</summary>
+    <nav aria-label="Navegación principal">
+    {% for name,target in [('Seguimiento','/indicadores'),('Indicadores','/indicadores?via=estadisticas#estadisticas'),('Historial','/#historial'),('Accesos','/accesos')] %}
+      <a href="{{target}}" {% if name==active %}aria-current="page"{% endif %}>{{name}}</a>
+    {% endfor %}
+    </nav>
+  </details>
+  <div class="session"><span>Don Carlos · Administración</span><form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><button>Cerrar sesión</button></form></div>
+</header>
+<script defer src="/static/admin-nav.js"></script>
+{%- endmacro %}

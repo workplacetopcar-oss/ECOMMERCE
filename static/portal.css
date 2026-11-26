@@ -16,3 +16,15 @@ main{min-width:0;width:100%;max-width:1550px;margin:auto;padding:26px clamp(18px
 .evidence-editor h3,#review-preview h3{margin-bottom:10px}.evidence-editor button{margin:8px 8px 0 0}
 #edit-state{margin-top:12px}.form-block .notes{margin-bottom:10px}
 @media(max-width:600px){.grid,.facts,.filters{grid-template-columns:minmax(0,1fr)}.form-block .form-footer{align-items:stretch;flex-direction:column}.form-block .form-footer a{text-align:center;padding:8px}}
+:root{font-size:16px;--edge:#e5e7e9}
+.workspace{grid-template-columns:220px minmax(0,1fr)}
+main{margin:0 auto}h1{font-size:clamp(28px,3vw,32px)}.panel{margin-bottom:20px}
+label.field,.fieldset-title{font-size:14px}.case-no,.facts,.queue-count,.pager{font-variant-numeric:tabular-nums}
+.notice.error{color:#a23327}
+#menu-toggle,.mobile-list{display:none}.queue-count:not(:empty){display:inline-block;margin-left:3px;font-size:.86em;color:var(--muted)}
+.case-nav{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}.case-nav button{font-size:14px}
+.finding-workspace{display:grid;grid-template-columns:minmax(160px,1fr) minmax(0,2fr);gap:18px}.finding-workspace h3{margin-bottom:6px}
+@media(max-width:820px){#menu-toggle{display:inline-flex;margin-left:auto;min-height:44px}.sidebar .account{margin:0}.sidebar nav{display:none;order:4;width:100%;border-top:1px solid var(--edge)}.sidebar nav.expanded{display:flex;padding-top:8px}.sidebar nav a,.sidebar .account button,.text-button,.queue-tabs button,.case-nav button{min-height:44px}.finding-workspace{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:600px){.wide-list{display:none}.mobile-list{display:block}.mobile-case{display:grid;justify-items:start;gap:6px;border-bottom:1px solid var(--edge);padding:12px 0}.mobile-case>a,.mobile-case summary{min-height:44px;display:flex;align-items:center;gap:5px}.mobile-case>p,.mobile-case>details{width:100%}.case-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.mobile-case a{overflow-wrap:anywhere}}
+@media print{.case-nav,#menu-toggle{display:none}}
+.editor-card{padding:14px;margin:12px 0;border:1px solid var(--edge);border-radius:8px;min-width:0}.editor-card>summary{font-weight:650;cursor:pointer;min-height:44px;align-content:center;overflow-wrap:anywhere}.field-error{display:block;margin:4px 0 0;color:#982c13;font-weight:600}.field [aria-invalid=true]{border-color:#a9361f}.editor-card>summary:focus-visible{outline:3px solid #916900;outline-offset:3px}
