@@ -228,12 +228,13 @@ def masters_admin():
             state = "completa"
         except Exception:
             state = "parcial"
-        return redirect(url_for("catalog.masters_admin",resultado=state), code=303)
+        session["catalog_refresh_result"] = state
+        return redirect(url_for("catalog.masters_admin"), code=303)
     row = conn.execute("SELECT metadata,loaded_at FROM catalog_snapshot").fetchone()
     runs = conn.execute("SELECT * FROM catalog_runs ORDER BY id DESC LIMIT 30").fetchall()
     return render_template("maestros.html",meta=json.loads(row[0]) if row else {},
                            loaded=row[1] if row else None,runs=runs,configured=configured,
-                           result=request.args.get("resultado"))
+                           result=session.pop("catalog_refresh_result",None))
 
 
 @bp.get("/api/catalog/products")

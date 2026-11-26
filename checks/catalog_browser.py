@@ -77,6 +77,11 @@ def verify(root, directory, browser):
         intl_line.locator("select[data-document-code]").select_option("0")
         expect(intl_line.locator('[name="reported_code"]')).not_to_have_value("")
         expect(intl_line.locator('[name="code"]')).to_have_value("")
+        intl_line.locator(".search-input").fill("3601D")
+        intl_line.locator("[data-pick]").first.click()
+        intl_line.locator('[name="match_reason"]').fill("Correspondencia de prueba")
+        intl_line.locator('[data-confirm-match]').click()
+        expect(international.locator("#notice")).to_contain_text("Versión 1")
         international.locator('[name="f_contact"]').fill("Contacto de prueba")
         international.locator('[name="profile_source"]').fill("Confirmación de prueba")
         international.locator('[data-command="save-client"]').click()
@@ -84,6 +89,14 @@ def verify(root, directory, browser):
         assert international.request.get(base+"/api/catalog/clients").json()["total"]==20
         with app.app_context():
             assert db().execute("SELECT count(*) FROM catalog_profiles").fetchone()[0]==1
+        assert international.request.get(base+"/maestros").status==403
+        admin=browser.new_page()
+        admin.goto(base)
+        admin.locator("#username").fill("administrador")
+        admin.locator("#password").fill(creds["administrador"])
+        admin.get_by_role("button",name="Ingresar").click()
+        admin.goto(base+"/maestros")
+        expect(admin.locator("main")).to_contain_text("8822")
         assert not errors, errors
         print("Chromium · CONTACTO, fuente original, SKU y unidad, fichas, códigos por cliente y perfil confirmados.")
     finally:

@@ -80,6 +80,23 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(rows[0]["tax_id"],"000ABC")
         self.assertEqual(self.client.post("/api/contacto/preview").status_code,403)
 
+    def test_verified_profile_and_versioned_equivalence(self):
+        self.write_cut()
+        response=self.client.put("/api/catalog/clients/01/profile",json={
+            "profile_version":0,"country":"Colombia","source_note":"Documento de prueba"})
+        self.assertEqual(response.status_code,200)
+        item=self.client.get("/api/catalog/clients?q=01").get_json()["items"][0]
+        self.assertEqual(item["country"],"Colombia")
+        self.assertIsNone(item["raw"]["pais_confirmado"])
+        self.assertEqual(item["source_note"],"Documento de prueba")
+        link=dict(client_id="01",reported_code="PROV",presentation="Unidad",sku="01M",reason="Ficha de prueba")
+        self.assertEqual(self.client.post("/api/catalog/equivalences",json=link).status_code,201)
+        self.assertEqual(self.client.post("/api/catalog/equivalences",json=link).status_code,409)
+        self.assertEqual(self.client.post("/api/catalog/equivalences",json=dict(link,version=1,reason="Cotejo")).status_code,201)
+        self.assertEqual(len(self.client.get("/api/catalog/equivalences?client_id=01").get_json()["items"]),2)
+        self.login("internacional")
+        self.assertEqual(self.client.get("/api/catalog/equivalences?client_id=01").get_json()["items"],[])
+
     def test_invalid_refresh_preserves_directory(self):
         self.write_cut()
         path = self.data / "productos_rsales.json"
