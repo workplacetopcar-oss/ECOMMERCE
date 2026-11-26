@@ -2,6 +2,7 @@
 import base64
 import hmac
 import json
+import os
 import re
 import secrets
 import struct
@@ -91,7 +92,7 @@ def test_incomplete_configuration_and_unavailable_keys(project, tmp_path, monkey
         raise OSError()
     monkeypatch.setattr(sites_identity, "read_keys", unavailable)
     assert app.test_client().get("/login", headers=headers()).status_code == 503
-    for field, bad in (("JWKS_URL", "http://id.example.invalid"), ("SUBJECTS", "{}"),
+    for field, bad in (("JWKS_URL", "http://id.example.invalid"), ("SUBJECTS", '{"inexistente":"sujeto"}'),
                        ("ALGORITHM", "HS256"), ("IDENTITY", "")):
         with monkeypatch.context() as env:
             env.setenv("RECLAMOS_SITES_" + field, bad)
@@ -163,3 +164,16 @@ def test_verification_uses_configured_https_jwks(tmp_path, monkeypatch):
         server.shutdown()
         thread.join()
         server.server_close()
+
+def test_only_verified_owner_subject_can_reach_its_login(project, tmp_path, monkeypatch):
+    _, headers, _, _ = project
+    subjects = json.loads(os.environ["RECLAMOS_SITES_SUBJECTS"])
+    monkeypatch.setenv("RECLAMOS_SITES_SUBJECTS", json.dumps({"administrador": subjects["administrador"]}))
+    app = create_app({"TESTING": True, "DATA_DIR": tmp_path})
+    client = app.test_client()
+    owner_login = client.get("/login", headers=headers("administrador"))
+    assert owner_login.status_code == 200
+    assert b'value="administrador" readonly' in owner_login.data
+    for path in ("/login", "/api/cases", "/api/cases/1/files/1"):
+        response = client.get(path, headers=headers("nacional"))
+        assert response.status_code == 403 and b"Acceso pendiente" in response.data

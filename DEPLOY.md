@@ -2,13 +2,15 @@
 
 ## Publicación en Sitios de ChatGPT
 
-El destino solicitado es un Sitio privado con el slug preferido `gestion-de-reclamos`. El dominio y el identificador de versión se registran cuando Sitios confirma la publicación. Esta máquina ofrece una utilidad de previsualización local; al comprobar su estado, el servicio de previsualización estaba indisponible. La herramienta de configuración del entorno de desarrollo solo administra ese entorno. Desde esta sesión quedaron pendientes la creación o selección del proyecto de Sitios, la asignación de los recursos y la publicación.
+El proyecto registrado es **Gestión de Reclamos y Calidad de Lubristone**. Su identificador está en [.openai/hosting.json](.openai/hosting.json), y el nombre reservado es `gestion-de-reclamos`. La audiencia indicada por el propietario es **solo el propietario**. El dominio reservado es https://gestion-de-reclamos.espacio-de-t-4244.chatgpt.site. La primera versión publicada y la audiencia efectiva deben verificarse en el control de Sitios del proyecto registrado.
+
+El manifiesto vincula este checkout con el proyecto. La aplicación web actual utiliza Flask/WSGI; el Worker de almacenamiento ofrece el acceso a D1 y R2. Antes de enviar una compilación, utiliza el contrato de ejecución y el empaquetado que admita ese proyecto para el servidor web completo. Desplegar únicamente el directorio `storage-worker/` entrega el gateway interno y omite las bandejas y formularios.
 
 **Qué verificar en el proyecto de destino**
 
 1. Obtener el contrato oficial de ejecución y despliegue que muestre el proyecto. Identificar qué código puede ejecutarse en el servidor, cómo se configuran secretos, cómo se aplican las migraciones y cómo se restringe la audiencia. La compatibilidad de la aplicación con ese runtime requiere una prueba en el proyecto.
 2. Obtener el contrato oficial de identidad. Identificar el identificador estable de cada persona y el mecanismo que permite al servidor comprobar quién realizó una solicitud. Si el destino entrega tokens firmados, verificar el emisor, la audiencia, las claves de verificación y la vigencia que especifique ese contrato. Si usa una sesión administrada, usar la API oficial de verificación. Estos parámetros dependen del proyecto. El navegador nunca decide el perfil.
-3. Vincular por un canal privado las cuatro identidades confirmadas con Nacional, Internacional, Calidad y Administración. Configurar la audiencia restringida en Sitios, comprobar el rechazo de sesiones desconocidas y verificar que cada identidad accede solo a los expedientes y adjuntos autorizados. La cuenta de Calidad requiere activación por Administración.
+3. Conservar la audiencia exclusiva del propietario para la primera publicación. Vincular solo identidades y perfiles confirmados de forma privada. Una identidad firmada pendiente de asignación recibe «Acceso pendiente». Los cuatro perfiles pueden probarse en local con cuentas sintéticas. Habilitar otras visitas reales requiere una decisión posterior del propietario; la cuenta de Calidad requiere además activación por Administración.
 4. Verificar los enlaces de recursos del proyecto a su base D1 y su almacenamiento R2 privado. Aplicar las migraciones a esa D1, probar reintentos y concurrencia, subir y recuperar una evidencia desde R2 con autorización por expediente. Comprobar que un usuario de otro canal carece de acceso y que la evidencia sigue disponible al reabrir el expediente desde otro dispositivo.
 5. Con la versión publicada, registrar el dominio HTTPS y la versión entregados por Sitios, el commit, el resultado por perfil y el resultado de la lectura autorizada de RSales. También probar el rechazo de un visitante ajeno a la audiencia usando la URL publicada.
 
@@ -28,7 +30,7 @@ Si el proyecto entrega un JWT OIDC firmado en todas las solicitudes al servidor,
 | `RECLAMOS_SITES_AUDIENCE` | Identificador de audiencia exacto. Esta integración exige un único `aud` de tipo texto. |
 | `RECLAMOS_SITES_JWKS_URL` | URL HTTPS directa del conjunto de claves de firma del emisor. El proceso necesita acceso a esa URL y certificados de confianza. |
 | `RECLAMOS_SITES_ALGORITHM` | Algoritmo asimétrico publicado por el emisor. Se admite `RS256`, `PS256` o `ES256`. |
-| `RECLAMOS_SITES_SUBJECTS` | Objeto JSON con las claves `nacional`, `internacional`, `calidad` y `administrador`. El valor de cada una es el `sub` individual confirmado. |
+| `RECLAMOS_SITES_SUBJECTS` | Objeto JSON con las cuentas que ya tienen una identidad confirmada (`nacional`, `internacional`, `calidad`, `administrador`). Cada valor es su `sub` único. Usa un objeto vacío mientras todas estén pendientes. |
 
 El JWT debe incluir `kid`, firma válida y los campos `iss`, `aud`, `sub`, `iat` y `exp`. La aplicación verifica también `nbf` si está presente. El proveedor debe publicar sus nuevas claves con antelación; el servidor conserva el conjunto verificado durante un máximo de 60 segundos. Configurar parcialmente el modo de identidad impide que la aplicación arranque.
 

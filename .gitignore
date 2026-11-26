@@ -14,3 +14,7 @@ ejemplos/
 *.db-wal
 *.db-shm
 session.key
+privado/
+sitios/Proyecto_registrado.md
+Plano_visual_Reclamos_Lubristone.html
+Prompt_Codex_Reclamos_y_Calidad_Lubristone.md

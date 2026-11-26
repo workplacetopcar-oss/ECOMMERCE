@@ -3,7 +3,8 @@
 {% block content %}<section class="login card">
 <p class="tag">RECLAMOS Y CALIDAD</p><h1>Acceso privado</h1>
 <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-<label for="username">Usuario</label><input id="username" name="username" autocomplete="username" autocapitalize="none" required autofocus>
-<label for="password">Clave</label><input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required>
+<label for="username">Usuario</label><input id="username" name="username" autocomplete="username" autocapitalize="none" required {% if g.sites_account %}value="{{ g.sites_account }}" readonly{% else %}autofocus{% endif %}>
+<label for="password">Clave</label><input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required {% if g.sites_account %}autofocus{% endif %}>
+<button class="pin-toggle" type="button" id="toggle-password" aria-controls="password" hidden>Mostrar clave</button>
 {% if public %}<label for="otp">Código de tu autenticador</label><input id="otp" name="otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required>{% endif %}
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}<button>Ingresar</button></form></section>{% endblock %}
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}<button>Ingresar</button></form></section><script defer src="/static/login.js"></script>{% endblock %}

@@ -50,10 +50,10 @@ class SiteIdentity:
                 or self.algorithm not in ("RS256", "PS256", "ES256")):
             raise ValueError("Revisa la configuración de transporte y verificación.")
         subjects = json.loads(settings["SUBJECTS"])
-        if (not isinstance(subjects, dict) or set(subjects) != set(accounts)
+        if (not isinstance(subjects, dict) or not set(subjects).issubset(accounts)
                 or not all(isinstance(sub, str) and sub.strip() for sub in subjects.values())
-                or len(set(subjects.values())) != len(accounts)):
-            raise ValueError("Cada cuenta requiere un sujeto distinto.")
+                or len(set(subjects.values())) != len(subjects)):
+            raise ValueError("Asocia únicamente cuentas conocidas con sujetos individuales distintos.")
         self.accounts = {subject: account for account, subject in subjects.items()}
         self.keys = {}
         self.refresh_after = 0
@@ -107,7 +107,7 @@ class SiteIdentity:
                             options={"require": ["exp", "iat", "iss", "aud", "sub"], "strict_aud": True})
         subject = claims["sub"]
         if subject not in self.accounts:
-            abort(403, "La identidad no está vinculada a una cuenta autorizada.")
+            abort(403, "Acceso pendiente. El propietario debe vincular tu identidad con una cuenta del programa.")
         binding = hashlib.sha256((self.issuer + "\0" + subject).encode()).hexdigest()
         return self.accounts[subject], binding
 
